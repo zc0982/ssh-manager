@@ -188,8 +188,16 @@ export function ImportDialog({ open, onOpenChange, hosts, onDone }: Open & { hos
 
 // ---------- 新电脑同步 ----------
 
-const isMac = /Mac/i.test(navigator.platform || navigator.userAgent);
-const RUN_CMD = isMac ? "pbpaste | bash" : "xclip -o -selection clipboard | bash";
+const detectedOs = (): "mac" | "linux" | "windows" => {
+	const ua = navigator.userAgent;
+	return /Windows/i.test(ua) ? "windows" : /Mac/i.test(ua) ? "mac" : "linux";
+};
+const RUN_CMD = {
+	mac: "pbpaste | bash",
+	linux: "xclip -o -selection clipboard | bash",
+	windows: 'powershell -nop -c "iex (Get-Clipboard -Raw)"',
+};
+const OS_LABEL = { mac: "macOS", linux: "Linux", windows: "Windows" };
 const AGENT_CMD = "git clone https://github.com/zc0982/ssh-manager.git\ncd ssh-manager && ./setup.sh";
 
 async function copy(text: string, ok = "已复制") {
@@ -202,12 +210,22 @@ export function NewPcDialog({ open, onOpenChange, status }: Open & { status: Sta
 	const [busy, setBusy] = useState(false);
 	const [error, setError] = useState("");
 	const [result, setResult] = useState<SyncResult | null>(null);
+	const [os, setOs] = useState(detectedOs);
+	const [unlocked, setUnlocked] = useState<{ priv: CryptoKey; servers: ExportServer[]; keys: ExportKey[] } | null>(null);
 	const [copied, setCopied] = useState(false);
 	const [showAgent, setShowAgent] = useState(false);
 
 	useEffect(() => {
-		if (!open) { setPassword(""); setResult(null); setCopied(false); setError(""); setShowAgent(false); }
+		if (!open) { setPassword(""); setResult(null); setUnlocked(null); setCopied(false); setError(""); setShowAgent(false); }
 	}, [open]);
+
+	// 切换系统时用已解开的私钥重新生成脚本，不用再输密码
+	useEffect(() => {
+		if (!unlocked) return;
+		setCopied(false);
+		buildSyncScript(unlocked.priv, unlocked.servers, unlocked.keys, os === "windows" ? "windows" : "posix")
+			.then(setResult, (e) => setError(e.message));
+	}, [unlocked, os]);
 
 	async function prepare(e: React.FormEvent) {
 		e.preventDefault();
@@ -216,7 +234,7 @@ export function NewPcDialog({ open, onOpenChange, status }: Open & { status: Sta
 		try {
 			const data = await api<{ backup: Backup; servers: ExportServer[]; keys: ExportKey[] }>("/api/export");
 			const priv = await unlockAgentKey(data.backup, password);
-			setResult(await buildSyncScript(priv, data.servers, data.keys));
+			setUnlocked({ priv, servers: data.servers, keys: data.keys });
 			setPassword("");
 		} catch (err: any) { setError(err.message); } finally { setBusy(false); }
 	}
@@ -256,9 +274,19 @@ export function NewPcDialog({ open, onOpenChange, status }: Open & { status: Sta
 							<CopyIcon />{copied ? "已复制，可再次复制" : "复制同步脚本"}
 						</Button>
 					</Step>
-					<Step n={3} title="在这台电脑的终端里输入（不要再复制别的内容）">
-						<pre className="mt-2 w-fit rounded-md bg-muted px-3 py-2 font-mono text-base text-foreground">{RUN_CMD}</pre>
-						<p className="mt-1">会备份原配置为 ~/.ssh/config.ssh-manager.bak，私钥写到 ~/.ssh/ssh-manager/（权限 600），运行后自动清空剪贴板。可重复运行，不会产生重复条目。</p>
+					<Step n={3} title={os === "windows" ? "打开「命令提示符」(cmd) 或 PowerShell，输入（不要再复制别的内容）" : "在终端里输入（不要再复制别的内容）"}>
+						<div className="mt-2 flex flex-wrap gap-1">
+							{(["mac", "windows", "linux"] as const).map((o) => (
+								<Button key={o} size="xs" variant={os === o ? "default" : "outline"} onClick={() => setOs(o)}>{OS_LABEL[o]}</Button>
+							))}
+						</div>
+						<pre className="mt-2 w-fit max-w-full overflow-x-auto rounded-md bg-muted px-3 py-2 font-mono text-base text-foreground">{RUN_CMD[os]}</pre>
+						<p className="mt-1">
+							{os === "windows"
+								? "写入 %USERPROFILE%\\.ssh\\config（原配置备份为 config.ssh-manager.bak），私钥写到 .ssh\\ssh-manager\\ 并设为仅当前用户可读，运行后自动清空剪贴板。"
+								: "写入 ~/.ssh/config（原配置备份为 config.ssh-manager.bak），私钥写到 ~/.ssh/ssh-manager/（权限 600），运行后自动清空剪贴板。"}
+							可重复运行，不会产生重复条目。
+						</p>
 					</Step>
 				</ol>
 				<div className="text-xs text-muted-foreground">

@@ -86,16 +86,18 @@ function delimiter(content: string) {
 	return d;
 }
 
-export type SyncResult = { script: string; servers: number; keyFiles: number; skipped: string[] };
+export type Platform = "posix" | "windows";
+export type SyncResult = { script: string; servers: number; keyFiles: number; skipped: string[]; platform: Platform };
 
-/** 解密全部服务器与密钥，生成同步脚本 */
-export async function buildSyncScript(priv: CryptoKey, servers: ExportServer[], keys: ExportKey[]): Promise<SyncResult> {
+type Prepared = { blocks: string[]; aliases: string[]; keys: Map<string, Uint8Array>; skipped: string[] };
+
+/** 解密全部服务器与密钥，生成 ssh-skill 格式的配置块 */
+async function prepare(priv: CryptoKey, servers: ExportServer[], keys: ExportKey[]): Promise<Prepared> {
 	const keyById = new Map(keys.map((k) => [k.id, k]));
-	const usedKeys = new Map<string, Uint8Array>();
+	const used = new Map<string, Uint8Array>();
 	const blocks: string[] = [];
 	const aliases: string[] = [];
 	const skipped: string[] = [];
-
 	for (const s of servers) {
 		if (!ALIAS_RE.test(s.alias)) { skipped.push(`${s.alias}（别名不合法）`); continue; }
 		let password: string | null = null;
@@ -109,8 +111,8 @@ export async function buildSyncScript(priv: CryptoKey, servers: ExportServer[], 
 			if (s.key_id && !k) { skipped.push(`${s.alias}（云端密钥缺失）`); continue; }
 			if (k) {
 				if (!ALIAS_RE.test(k.name)) { skipped.push(`${s.alias}（密钥名不合法）`); continue; }
-				if (!usedKeys.has(k.name)) usedKeys.set(k.name, await unseal(priv, k.key_encrypted));
-				identity = `~/.ssh/ssh-manager/${k.name}.key`;
+				if (!used.has(k.name)) used.set(k.name, await unseal(priv, k.key_encrypted));
+				identity = `~/.ssh/ssh-manager/${k.name}.key`; // Windows 版 OpenSSH 同样支持 ~
 			} else {
 				identity = s.identity_file;
 			}
@@ -118,16 +120,22 @@ export async function buildSyncScript(priv: CryptoKey, servers: ExportServer[], 
 		aliases.push(s.alias);
 		blocks.push(hostBlock(s, password, identity));
 	}
+	return { blocks, aliases, keys: used, skipped };
+}
 
-	const keyCmds = [...usedKeys].map(([name, data]) => {
+const doneMsg = (p: Prepared, where: string) =>
+	`SSH Manager：已同步 ${p.aliases.length} 台服务器、${p.keys.size} 个私钥到 ${where}（原配置备份为 config.ssh-manager.bak）`;
+
+/** macOS / Linux：bash 脚本，`pbpaste | bash` 运行 */
+function renderPosix(p: Prepared): string {
+	const keyCmds = [...p.keys].map(([name, data]) => {
 		const b64 = toB64(data).replace(/(.{76})/g, "$1\n");
 		const d = delimiter(b64);
 		return `base64 -d > "$KEYDIR/${name}.key" <<'${d}'\n${b64}\n${d}\nchmod 600 "$KEYDIR/${name}.key"`;
 	});
-	const cfgText = blocks.join("\n\n");
+	const cfgText = p.blocks.join("\n\n");
 	const cd = delimiter(cfgText);
-
-	const script = `#!/usr/bin/env bash
+	return `#!/usr/bin/env bash
 # SSH Manager：把云端的服务器、密码和私钥同步到本机 ~/.ssh（由网页生成，运行后会清空剪贴板）
 set -euo pipefail
 umask 077
@@ -137,12 +145,12 @@ touch "$CFG"
 cp "$CFG" "$CFG.ssh-manager.bak"
 ${keyCmds.join("\n")}
 # 先移除同名的旧条目（只删 "# ===== 别名 =====" 起的元数据和 Host 块），再追加新条目
-awk -v list="${aliases.join(" ")}" '
+awk -v list="${p.aliases.join(" ")}" '
 BEGIN { n = split(list, a, " "); for (i = 1; i <= n; i++) want[a[i]] = 1 }
 function flush() { for (i = 1; i <= nb; i++) print buf[i]; nb = 0 }
 {
-  if (skip) { if ($0 ~ /^[ \\t]/ || $0 ~ /^[ \\t]*$/) next; skip = 0 }
-  if ($0 ~ /^[ \\t]*#/ || $0 ~ /^[ \\t]*$/) { buf[++nb] = $0; next }
+  if (skip) { if ($0 ~ /^[ \t]/ || $0 ~ /^[ \t]*$/) next; skip = 0 }
+  if ($0 ~ /^[ \t]*#/ || $0 ~ /^[ \t]*$/) { buf[++nb] = $0; next }
   if ($1 == "Host" && NF == 2 && ($2 in want)) {
     cut = 0
     for (i = nb; i >= 1; i--) if (buf[i] == "# ===== " $2 " =====") { cut = i; break }
@@ -153,13 +161,85 @@ function flush() { for (i = 1; i <= nb; i++) print buf[i]; nb = 0 }
 }
 END { flush() }' "$CFG.ssh-manager.bak" > "$CFG.tmp"
 # 原有内容末尾统一留一个空行，再追加
-if [ -s "$CFG.tmp" ]; then printf '%s\\n\\n' "$(cat "$CFG.tmp")" > "$CFG.tmp2" && mv "$CFG.tmp2" "$CFG.tmp"; fi
+if [ -s "$CFG.tmp" ]; then printf '%s\n\n' "$(cat "$CFG.tmp")" > "$CFG.tmp2" && mv "$CFG.tmp2" "$CFG.tmp"; fi
 cat >> "$CFG.tmp" <<'${cd}'
 ${cfgText}
 ${cd}
 mv "$CFG.tmp" "$CFG"; chmod 600 "$CFG"
 command -v pbcopy >/dev/null 2>&1 && pbcopy </dev/null || true
-echo "SSH Manager：已同步 ${aliases.length} 台服务器、${usedKeys.size} 个私钥到 ~/.ssh（原配置备份为 ~/.ssh/config.ssh-manager.bak）"
+echo "${doneMsg(p, "~/.ssh")}"
 `;
-	return { script, servers: aliases.length, keyFiles: usedKeys.size, skipped };
+}
+
+/** Windows：PowerShell 脚本，在 cmd 里用 `powershell -nop -c "iex (Get-Clipboard -Raw)"` 运行。
+ *  兼容 Windows 自带的 PowerShell 5.1（不用 &&、??、三元运算等 7.x 语法）。 */
+function renderWindows(p: Prepared): string {
+	// 单引号 here-string 内容不能有以 '@ 开头的行；配置行都以 "#"、"Host" 或空格开头，base64 不含 '@
+	const keyCmds = [...p.keys].map(([name, data]) => {
+		const b64 = toB64(data).replace(/(.{76})/g, "$1\n");
+		return `$k = Join-Path $keyDir '${name}.key'
+$b64 = (@'
+${b64}
+'@) -replace '\\s', ''
+[IO.File]::WriteAllBytes($k, [Convert]::FromBase64String($b64))
+Protect-SshFile $k`;
+	});
+	const list = p.aliases.map((a) => `'${a}'`).join(", ");
+	return `# SSH Manager：把云端的服务器、密码和私钥同步到本机 %USERPROFILE%\\.ssh（由网页生成，运行后会清空剪贴板）
+$ErrorActionPreference = 'Stop'
+$ssh = Join-Path $HOME '.ssh'
+$cfg = Join-Path $ssh 'config'
+$keyDir = Join-Path $ssh 'ssh-manager'
+New-Item -ItemType Directory -Force -Path $ssh, $keyDir | Out-Null
+if (-not (Test-Path $cfg)) { New-Item -ItemType File -Path $cfg | Out-Null }
+Copy-Item $cfg "$cfg.ssh-manager.bak" -Force
+$utf8 = New-Object System.Text.UTF8Encoding $false
+function Protect-SshFile($path) {
+  # Windows 版 OpenSSH 拒绝其他用户可读的私钥：去掉继承权限，只保留当前用户
+  if ($env:OS -eq 'Windows_NT') {
+    icacls $path /inheritance:r /grant:r "$($env:USERDOMAIN)\\$($env:USERNAME):(F)" | Out-Null
+  } else { chmod 600 $path }
+}
+${keyCmds.join("\n")}
+# 先移除同名的旧条目（只删 "# ===== 别名 =====" 起的元数据和 Host 块），再追加新条目
+$want = @{}
+foreach ($a in @(${list})) { $want[$a] = $true }
+$lines = [IO.File]::ReadAllText("$cfg.ssh-manager.bak") -split "\\r?\\n"
+$out = New-Object System.Collections.Generic.List[string]
+$buf = New-Object System.Collections.Generic.List[string]
+$skip = $false
+foreach ($line in $lines) {
+  if ($skip) {
+    if ($line -match '^[ \\t]' -or $line -match '^\\s*$') { continue }
+    $skip = $false
+  }
+  if ($line -match '^\\s*#' -or $line -match '^\\s*$') { $buf.Add($line); continue }
+  $parts = $line.Trim() -split '\\s+'
+  if ($parts.Count -eq 2 -and $parts[0] -eq 'Host' -and $want.ContainsKey($parts[1])) {
+    $cut = -1
+    for ($i = $buf.Count - 1; $i -ge 0; $i--) { if ($buf[$i] -eq ('# ===== ' + $parts[1] + ' =====')) { $cut = $i; break } }
+    if ($cut -ge 0) { $buf.RemoveRange($cut, $buf.Count - $cut) }
+    $out.AddRange($buf); $buf.Clear(); $skip = $true; continue
+  }
+  $out.AddRange($buf); $buf.Clear(); $out.Add($line)
+}
+$out.AddRange($buf)
+$text = ($out -join "\`n").TrimEnd()
+if ($text) { $text += "\`n\`n" }
+$text += (@'
+${p.blocks.join("\n\n")}
+'@) -replace "\`r", ''
+$text += "\`n"
+[IO.File]::WriteAllText($cfg, $text, $utf8)
+Protect-SshFile $cfg
+try { Set-Clipboard -Value $null } catch { try { Set-Clipboard -Value ' ' } catch { } }
+Write-Host "${doneMsg(p, "%USERPROFILE%\\.ssh")}"
+`;
+}
+
+/** 解密全部服务器与密钥，生成对应平台的同步脚本 */
+export async function buildSyncScript(priv: CryptoKey, servers: ExportServer[], keys: ExportKey[], platform: Platform = "posix"): Promise<SyncResult> {
+	const p = await prepare(priv, servers, keys);
+	const script = platform === "windows" ? renderWindows(p) : renderPosix(p);
+	return { script, servers: p.aliases.length, keyFiles: p.keys.size, skipped: p.skipped, platform };
 }

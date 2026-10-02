@@ -73,13 +73,15 @@ SSH 连接管理系统：服务器清单存在云端，网页托管在 Cloudflar
 不需要下载源代码，也不需要安装程序：
 
 1. 在新电脑的浏览器里登录网页，点「新电脑」，输入主密码。浏览器在本地解开 agent 私钥，再解密云端的服务器密码和 SSH 私钥，生成同步脚本。
-2. 点「复制同步脚本」，然后在终端输入：
+2. 点「复制同步脚本」，然后在终端输入（页面会按系统自动选择）：
 
-   ```bash
-   pbpaste | bash
-   ```
+   | 系统 | 命令 |
+   |---|---|
+   | macOS | `pbpaste \| bash` |
+   | Windows（cmd 或 PowerShell） | `powershell -nop -c "iex (Get-Clipboard -Raw)"` |
+   | Linux | `xclip -o -selection clipboard \| bash` |
 
-   脚本会备份原配置为 `~/.ssh/config.ssh-manager.bak`，用 ssh-skill 的格式把所有服务器写进 `~/.ssh/config`（同名条目先替换，其他配置不动），私钥写到 `~/.ssh/ssh-manager/`（600 权限），最后清空剪贴板。可以重复运行。
+   脚本会备份原配置为 `~/.ssh/config.ssh-manager.bak`，用 ssh-skill 的格式把所有服务器写进 `~/.ssh/config`（同名条目先替换，其他配置不动），私钥写到 `~/.ssh/ssh-manager/`（macOS/Linux 为 600 权限；Windows 用 icacls 设为仅当前用户可访问），最后清空剪贴板。可以重复运行。Windows 写入 `%USERPROFILE%\.ssh\config`，UTF-8 无 BOM。
 
 为什么还要一条终端命令：浏览器的 File System Access API 明确禁止网页写入 `~/.ssh`。
 
