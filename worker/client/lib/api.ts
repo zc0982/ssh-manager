@@ -21,7 +21,7 @@ export type Server = {
 };
 
 /** 环境即服务器分组 */
-export type Environment = { name: string; color: string; description: string; sort_order: number; server_count: number };
+export type Environment = { name: string; label: string; color: string; description: string; sort_order: number; server_count: number };
 
 export type SshKey = { id: string; name: string; comment: string; created_at: string; used_by: number };
 

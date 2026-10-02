@@ -85,7 +85,8 @@ async function assertEnv(sql: Sql, name: string) {
 function parseEnv(b: any) {
 	const name = str(typeof b?.name === "string" ? b.name.trim() : b?.name, "环境名称", { required: true, re: ENV_RE, max: 32 })!;
 	const color = ENV_COLORS.has(b?.color) ? b.color : "magenta";
-	return { name, color, description: str(b?.description, "说明", { max: 200 }) ?? "" };
+	const label = str(typeof b?.label === "string" ? b.label.trim() : b?.label, "显示名称", { max: 32 }) ?? "";
+	return { name, label, color, description: str(b?.description, "说明", { max: 200 }) ?? "" };
 }
 
 /** 环境改名/迁移后，让受影响服务器的 ~/.ssh/config 也更新 */
@@ -194,8 +195,8 @@ async function userApi(req: Request, sql: Sql, me: string, path: string[]): Prom
 			const dup = await sql`select 1 from environments where name = ${e.name}`;
 			if (dup.length) throw new HttpError(409, `环境 ${e.name} 已存在`);
 			const [row] = await sql`
-				insert into environments (name, color, description, sort_order)
-				values (${e.name}, ${e.color}, ${e.description}, (select coalesce(max(sort_order), 0) + 1 from environments))
+				insert into environments (name, label, color, description, sort_order)
+				values (${e.name}, ${e.label}, ${e.color}, ${e.description}, (select coalesce(max(sort_order), 0) + 1 from environments))
 				returning *`;
 			return json({ ...row, server_count: 0 }, 201);
 		}
@@ -206,6 +207,21 @@ async function userApi(req: Request, sql: Sql, me: string, path: string[]): Prom
 				for (const [i, name] of names.entries()) await tx`update environments set sort_order = ${i + 1} where name = ${name}`;
 			});
 			return json({ ok: true });
+		}
+		if (b && c === "servers" && m === "PUT") {
+			// 拖动服务器到分组：改 environment 并同步到本机
+			const name = decodeURIComponent(b);
+			await assertEnv(sql, name);
+			const { server_ids } = await body(req);
+			if (!Array.isArray(server_ids) || !server_ids.length || server_ids.some((x) => typeof x !== "string" || !UUID_RE.test(x))) {
+				throw new HttpError(422, "server_ids 格式不正确");
+			}
+			const moved = await sql`
+				update servers set environment = ${name}
+				where id = any(${server_ids}) and environment <> ${name}
+				returning id, alias`;
+			for (const r of moved) await enqueue(sql, me, "sync", r);
+			return json({ moved: moved.length });
 		}
 		if (b && !c) {
 			const name = decodeURIComponent(b);

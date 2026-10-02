@@ -8,7 +8,7 @@ import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Separator } from "@/components/ui/separator";
 import { api, type Environment } from "@/lib/api";
-import { colorOf, ENV_COLORS } from "@/lib/envs";
+import { colorOf, ENV_COLORS, envLabel } from "@/lib/envs";
 import { cn } from "@/lib/utils";
 
 const NAME_RE = /^[A-Za-z0-9._-]{1,32}$/;
@@ -20,12 +20,14 @@ export function ColorDot({ color, className }: { color: string; className?: stri
 /** 按环境颜色显示的徽标 */
 export function EnvBadge({ env, envs }: { env: string; envs: Environment[] }) {
 	const color = envs.find((e) => e.name === env)?.color;
-	return <Badge variant="outline" className={colorOf(color).badge}>{env}</Badge>;
+	return <Badge variant="outline" className={colorOf(color).badge} title={env}>{envLabel(envs, env)}</Badge>;
 }
 
 export function EnvSelectItems({ envs }: { envs: Environment[] }) {
 	return envs.map((e) => (
-		<SelectItem key={e.name} value={e.name}><span className="flex items-center gap-2"><ColorDot color={e.color} />{e.name}</span></SelectItem>
+		<SelectItem key={e.name} value={e.name}>
+			<span className="flex items-center gap-2"><ColorDot color={e.color} />{e.label || e.name}{e.label && <span className="font-mono text-xs text-muted-foreground">{e.name}</span>}</span>
+		</SelectItem>
 	));
 }
 
@@ -46,8 +48,9 @@ export function EnvironmentsDialog({ open, onOpenChange, envs, onChanged }: {
 	open: boolean; onOpenChange: (o: boolean) => void; envs: Environment[]; onChanged: () => void;
 }) {
 	const [name, setName] = useState("");
+	const [label, setLabel] = useState("");
 	const [color, setColor] = useState("magenta");
-	const [editing, setEditing] = useState<{ from: string; name: string; color: string } | null>(null);
+	const [editing, setEditing] = useState<{ from: string; name: string; label: string; color: string } | null>(null);
 	const [deleting, setDeleting] = useState<{ env: Environment; moveTo: string } | null>(null);
 	const [busy, setBusy] = useState(false);
 
@@ -65,7 +68,7 @@ export function EnvironmentsDialog({ open, onOpenChange, envs, onChanged }: {
 		e.preventDefault();
 		const n = name.trim();
 		if (!NAME_RE.test(n)) return toast.error("名称只能包含字母、数字、. _ -，最长 32 位");
-		run(async () => { await api("/api/environments", { method: "POST", body: { name: n, color } }); setName(""); }, () => `已创建 ${n}`);
+		run(async () => { await api("/api/environments", { method: "POST", body: { name: n, label: label.trim(), color } }); setName(""); setLabel(""); }, () => `已创建 ${label.trim() || n}`);
 	};
 
 	const save = () => {
@@ -74,7 +77,7 @@ export function EnvironmentsDialog({ open, onOpenChange, envs, onChanged }: {
 		if (!NAME_RE.test(n)) return toast.error("名称只能包含字母、数字、. _ -，最长 32 位");
 		run(
 			async () => {
-				const r = await api(`/api/environments/${encodeURIComponent(editing.from)}`, { method: "PUT", body: { name: n, color: editing.color } });
+				const r = await api(`/api/environments/${encodeURIComponent(editing.from)}`, { method: "PUT", body: { name: n, label: editing.label.trim(), color: editing.color } });
 				setEditing(null);
 				return r;
 			},
@@ -84,7 +87,7 @@ export function EnvironmentsDialog({ open, onOpenChange, envs, onChanged }: {
 
 	const remove = (env: Environment) => {
 		if (env.server_count === 0) {
-			if (!confirm(`删除环境 ${env.name}？`)) return;
+			if (!confirm(`删除分组 ${env.label || env.name}？`)) return;
 			run(() => api(`/api/environments/${encodeURIComponent(env.name)}`, { method: "DELETE" }), () => "已删除");
 			return;
 		}
@@ -114,14 +117,14 @@ export function EnvironmentsDialog({ open, onOpenChange, envs, onChanged }: {
 				<DialogHeader>
 					<DialogTitle>分组管理</DialogTitle>
 					<DialogDescription>
-						分组就是服务器的「环境」字段，会写进本机 ~/.ssh/config 的 environment 元数据（ssh-skill 可按环境批量操作）。
-						改名会自动更新所有相关服务器并同步到本机。
+						分组就是服务器的「环境」字段。中文名只在网页显示；英文名会写进本机 ~/.ssh/config 的 environment 元数据（ssh-skill 可按环境批量操作），
+						修改英文名会自动更新所有相关服务器并同步到本机。在左侧列表里可以直接把服务器拖到其他分组。
 					</DialogDescription>
 				</DialogHeader>
 
 				{deleting ? (
 					<div className="grid gap-3 rounded-md border border-destructive/40 p-3 text-sm">
-						<p>环境 <b>{deleting.env.name}</b> 还有 {deleting.env.server_count} 台服务器。删除前把它们移到：</p>
+						<p>分组 <b>{deleting.env.label || deleting.env.name}</b> 还有 {deleting.env.server_count} 台服务器。删除前把它们移到：</p>
 						<Select value={deleting.moveTo} onValueChange={(v) => setDeleting({ ...deleting, moveTo: v })}>
 							<SelectTrigger className="w-full"><SelectValue /></SelectTrigger>
 							<SelectContent><EnvSelectItems envs={envs.filter((e) => e.name !== deleting.env.name)} /></SelectContent>
@@ -140,7 +143,10 @@ export function EnvironmentsDialog({ open, onOpenChange, envs, onChanged }: {
 									{editing?.from === e.name ? (
 										<>
 											<ColorSelect value={editing.color} onChange={(c) => setEditing({ ...editing, color: c })} />
-											<Input className="h-8 flex-1 font-mono" value={editing.name} autoFocus maxLength={32}
+											<Input className="h-8 min-w-0 flex-1" placeholder="中文名" value={editing.label} autoFocus maxLength={32}
+												onChange={(ev) => setEditing({ ...editing, label: ev.target.value })}
+												onKeyDown={(ev) => { if (ev.key === "Enter") save(); if (ev.key === "Escape") setEditing(null); }} />
+											<Input className="h-8 w-28 font-mono" placeholder="英文名" value={editing.name} maxLength={32}
 												onChange={(ev) => setEditing({ ...editing, name: ev.target.value })}
 												onKeyDown={(ev) => { if (ev.key === "Enter") save(); if (ev.key === "Escape") setEditing(null); }} />
 											<Button size="icon-sm" disabled={busy} onClick={save} title="保存"><CheckIcon /></Button>
@@ -149,11 +155,14 @@ export function EnvironmentsDialog({ open, onOpenChange, envs, onChanged }: {
 									) : (
 										<>
 											<ColorDot color={e.color} />
-											<span className="min-w-0 flex-1 truncate font-mono text-sm">{e.name}</span>
+											<span className="min-w-0 flex-1 truncate text-sm">
+												{e.label || e.name}
+												{e.label && <span className="ml-2 font-mono text-xs text-muted-foreground">{e.name}</span>}
+											</span>
 											<span className="text-xs text-muted-foreground">{e.server_count} 台</span>
 											<Button size="icon-sm" variant="ghost" disabled={busy || i === 0} onClick={() => move(i, -1)} title="上移"><ArrowUpIcon /></Button>
 											<Button size="icon-sm" variant="ghost" disabled={busy || i === envs.length - 1} onClick={() => move(i, 1)} title="下移"><ArrowDownIcon /></Button>
-											<Button size="icon-sm" variant="ghost" onClick={() => setEditing({ from: e.name, name: e.name, color: e.color })} title="编辑"><PencilIcon /></Button>
+											<Button size="icon-sm" variant="ghost" onClick={() => setEditing({ from: e.name, name: e.name, label: e.label, color: e.color })} title="编辑"><PencilIcon /></Button>
 											<Button size="icon-sm" variant="ghost" className="text-destructive" disabled={busy} onClick={() => remove(e)} title="删除"><Trash2Icon /></Button>
 										</>
 									)}
@@ -163,7 +172,8 @@ export function EnvironmentsDialog({ open, onOpenChange, envs, onChanged }: {
 						<Separator />
 						<form onSubmit={create} className="flex items-center gap-2">
 							<ColorSelect value={color} onChange={setColor} />
-							<Input className="flex-1 font-mono" placeholder="新分组，如 test、client-a" maxLength={32} value={name} onChange={(ev) => setName(ev.target.value)} />
+							<Input className="min-w-0 flex-1" placeholder="中文名，如 测试" maxLength={32} value={label} onChange={(ev) => setLabel(ev.target.value)} />
+							<Input className="w-32 font-mono" placeholder="英文名 test" maxLength={32} value={name} onChange={(ev) => setName(ev.target.value)} />
 							<Button type="submit" disabled={busy || !name.trim()}><PlusIcon />新建</Button>
 						</form>
 					</>

@@ -50,6 +50,25 @@ export default function App() {
 		return () => clearInterval(t);
 	}, [loadStatus, loadServers, loadKeys, loadEnvs]);
 
+	const [dragging, setDragging] = useState<string | null>(null); // 正在拖动的服务器 id
+	const [dropTarget, setDropTarget] = useState<string | null>(null);
+
+	async function moveServer(serverId: string, env: string) {
+		const s = servers.find((x) => x.id === serverId);
+		if (!s || s.environment === env) return;
+		const label = envs.find((e) => e.name === env)?.label || env;
+		setServers((cur) => cur.map((x) => (x.id === serverId ? { ...x, environment: env } : x))); // 乐观更新
+		try {
+			await api(`/api/environments/${encodeURIComponent(env)}/servers`, { method: "PUT", body: { server_ids: [serverId] } });
+			toast.success(`已把 ${s.alias} 移到「${label}」，正在同步到本机`);
+		} catch (e: any) {
+			toast.error(e.message);
+		} finally {
+			loadServers();
+			loadEnvs();
+		}
+	}
+
 	const toggleGroup = (id: string) => {
 		const next = new Set(collapsed);
 		if (next.has(id)) next.delete(id); else next.add(id);
@@ -64,10 +83,10 @@ export default function App() {
 	});
 	const online = status?.agents.some((a) => a.online) ?? false;
 	const sections = useMemo(() => {
-		const list = envs.map((e) => ({ id: e.name, name: e.name, color: e.color, servers: visible.filter((s) => s.environment === e.name) }));
+		const list = envs.map((e) => ({ id: e.name, name: e.name, label: e.label, color: e.color, servers: visible.filter((s) => s.environment === e.name) }));
 		const known = new Set(envs.map((e) => e.name));
 		const orphan = visible.filter((s) => !known.has(s.environment)); // 理论上不会出现（有外键）
-		if (orphan.length) list.push({ id: "__other__", name: "其他", color: "gray", servers: orphan });
+		if (orphan.length) list.push({ id: "__other__", name: "", label: "其他", color: "gray", servers: orphan });
 		// 搜索时隐藏空分组
 		return list.filter((sec) => sec.servers.length || !query);
 	}, [envs, visible, query]);
@@ -161,17 +180,39 @@ export default function App() {
 								{sections.map((sec) => {
 									const open = !collapsed.has(sec.id) || !!query;
 									return (
-										<section key={sec.id}>
+										<section
+											key={sec.id}
+											className={cn("rounded-md transition-colors", dropTarget === sec.id && "bg-primary/15 ring-1 ring-primary")}
+											onDragOver={(e) => {
+												if (!dragging || !sec.name) return;
+												e.preventDefault();
+												e.dataTransfer.dropEffect = "move";
+												if (dropTarget !== sec.id) setDropTarget(sec.id);
+											}}
+											onDragLeave={(e) => {
+												if (!e.currentTarget.contains(e.relatedTarget as Node)) setDropTarget((t) => (t === sec.id ? null : t));
+											}}
+											onDrop={(e) => {
+												e.preventDefault();
+												const id = e.dataTransfer.getData("text/x-server-id") || dragging;
+												setDropTarget(null);
+												setDragging(null);
+												if (id && sec.name) moveServer(id, sec.name);
+											}}
+										>
 											<button type="button" onClick={() => toggleGroup(sec.id)}
-												className="flex w-full items-center gap-1.5 rounded-md px-1.5 py-1 font-mono text-xs font-medium text-muted-foreground hover:text-foreground">
+												className="flex w-full items-center gap-1.5 rounded-md px-1.5 py-1 text-xs font-medium text-muted-foreground hover:text-foreground">
 												<ChevronRightIcon className={cn("size-3.5 transition-transform", open && "rotate-90")} />
 												<ColorDot color={sec.color} className="size-2" />
-												<span className="min-w-0 flex-1 truncate text-left">{sec.name}</span>
+												<span className="min-w-0 flex-1 truncate text-left">
+													{sec.label || sec.name}
+													{sec.label && sec.name && <span className="ml-1.5 font-mono opacity-60">{sec.name}</span>}
+												</span>
 												<span className="tabular-nums">{sec.servers.length}</span>
 											</button>
 											{open && (sec.servers.length
-												? <ServerList servers={sec.servers} envs={envs} selectedId={selectedId} onSelect={setSelectedId} />
-												: <p className="py-1.5 pl-7 text-xs text-muted-foreground">空分组</p>)}
+												? <ServerList servers={sec.servers} envs={envs} selectedId={selectedId} onSelect={setSelectedId} onDragStart={setDragging} onDragEnd={() => { setDragging(null); setDropTarget(null); }} />
+												: <p className="py-1.5 pl-7 text-xs text-muted-foreground">{dragging ? "拖到这里" : "空分组"}</p>)}
 										</section>
 									);
 								})}
@@ -224,13 +265,24 @@ export default function App() {
 	);
 }
 
-function ServerList({ servers, envs, selectedId, onSelect }: { servers: Server[]; envs: Environment[]; selectedId: string | null; onSelect: (id: string) => void }) {
+function ServerList({ servers, envs, selectedId, onSelect, onDragStart, onDragEnd }: {
+	servers: Server[]; envs: Environment[]; selectedId: string | null; onSelect: (id: string) => void;
+	onDragStart?: (id: string) => void; onDragEnd?: () => void;
+}) {
 	return (
 		<ul className="flex flex-col gap-0.5">
 			{servers.map((s) => (
 				<li key={s.id} className="min-w-0">
 					<button
 						type="button"
+						draggable={!!onDragStart}
+						onDragStart={(e) => {
+							e.dataTransfer.setData("text/x-server-id", s.id);
+							e.dataTransfer.effectAllowed = "move";
+							onDragStart?.(s.id);
+						}}
+						onDragEnd={onDragEnd}
+						title={onDragStart ? "拖到其他分组可移动" : undefined}
 						onClick={() => onSelect(s.id)}
 						className={cn("w-full rounded-md px-2.5 py-2 text-left transition-colors hover:bg-muted", s.id === selectedId && "bg-muted")}
 					>

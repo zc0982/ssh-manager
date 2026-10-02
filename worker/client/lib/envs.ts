@@ -11,3 +11,6 @@ export const ENV_COLORS: Record<string, { label: string; dot: string; badge: str
 };
 
 export const colorOf = (c: string | undefined) => ENV_COLORS[c ?? ""] ?? ENV_COLORS.gray;
+
+/** 显示名称：有中文名用中文名，否则用环境名 */
+export const envLabel = (envs: { name: string; label: string }[], name: string) => envs.find((e) => e.name === name)?.label || name;
