@@ -9,7 +9,7 @@ export type ExportServer = {
 	identity_file: string | null; key_id: string | null; password_encrypted: string | null; proxy_jump: string | null;
 	environment: string; tags: string[]; location: string; description: string; created_at: string; updated_at: string;
 };
-export type ExportKey = { id: string; name: string; key_encrypted: string };
+export type ExportKey = { id: string; name: string; key_encrypted: string; public_key?: string };
 
 const AAD = { 1: "ssh-manager-agent-key", 2: "ssh-manager-bundle-v2" } as Record<number, string>;
 const ALIAS_RE = /^[A-Za-z0-9._-]+$/;
@@ -89,12 +89,13 @@ function delimiter(content: string) {
 export type Platform = "posix" | "windows";
 export type SyncResult = { script: string; servers: number; keyFiles: number; skipped: string[]; platform: Platform };
 
-type Prepared = { blocks: string[]; aliases: string[]; keys: Map<string, Uint8Array>; skipped: string[] };
+type Prepared = { blocks: string[]; aliases: string[]; keys: Map<string, Uint8Array>; pubs: Map<string, string>; skipped: string[] };
 
 /** 解密全部服务器与密钥，生成 ssh-skill 格式的配置块 */
 async function prepare(priv: CryptoKey, servers: ExportServer[], keys: ExportKey[]): Promise<Prepared> {
 	const keyById = new Map(keys.map((k) => [k.id, k]));
 	const used = new Map<string, Uint8Array>();
+	const pubs = new Map<string, string>();
 	const blocks: string[] = [];
 	const aliases: string[] = [];
 	const skipped: string[] = [];
@@ -112,6 +113,7 @@ async function prepare(priv: CryptoKey, servers: ExportServer[], keys: ExportKey
 			if (k) {
 				if (!ALIAS_RE.test(k.name)) { skipped.push(`${s.alias}（密钥名不合法）`); continue; }
 				if (!used.has(k.name)) used.set(k.name, await unseal(priv, k.key_encrypted));
+				if (k.public_key && /^[a-z0-9@.-]+ [A-Za-z0-9+/=]+( [^\r\n'"]*)?$/.test(k.public_key)) pubs.set(k.name, k.public_key);
 				identity = `~/.ssh/ssh-manager/${k.name}.key`; // Windows 版 OpenSSH 同样支持 ~
 			} else {
 				identity = s.identity_file;
@@ -120,7 +122,7 @@ async function prepare(priv: CryptoKey, servers: ExportServer[], keys: ExportKey
 		aliases.push(s.alias);
 		blocks.push(hostBlock(s, password, identity));
 	}
-	return { blocks, aliases, keys: used, skipped };
+	return { blocks, aliases, keys: used, pubs, skipped };
 }
 
 const doneMsg = (p: Prepared, where: string) =>
@@ -131,7 +133,9 @@ function renderPosix(p: Prepared): string {
 	const keyCmds = [...p.keys].map(([name, data]) => {
 		const b64 = toB64(data).replace(/(.{76})/g, "$1\n");
 		const d = delimiter(b64);
-		return `base64 -d > "$KEYDIR/${name}.key" <<'${d}'\n${b64}\n${d}\nchmod 600 "$KEYDIR/${name}.key"`;
+		const pub = p.pubs.get(name);
+		const pubCmd = pub ? `\nprintf '%s\\n' '${pub}' > "$KEYDIR/${name}.key.pub"; chmod 644 "$KEYDIR/${name}.key.pub"` : "";
+		return `base64 -d > "$KEYDIR/${name}.key" <<'${d}'\n${b64}\n${d}\nchmod 600 "$KEYDIR/${name}.key"${pubCmd}`;
 	});
 	const cfgText = p.blocks.join("\n\n");
 	const cd = delimiter(cfgText);
@@ -182,7 +186,8 @@ $b64 = (@'
 ${b64}
 '@) -replace '\\s', ''
 [IO.File]::WriteAllBytes($k, [Convert]::FromBase64String($b64))
-Protect-SshFile $k`;
+Protect-SshFile $k${p.pubs.get(name) ? `
+[IO.File]::WriteAllText("$k.pub", '${p.pubs.get(name)}' + "\`n", $utf8)` : ""}`;
 	});
 	const list = p.aliases.map((a) => `'${a}'`).join(", ");
 	return `# SSH Manager：把云端的服务器、密码和私钥同步到本机 %USERPROFILE%\\.ssh（由网页生成，运行后会清空剪贴板）

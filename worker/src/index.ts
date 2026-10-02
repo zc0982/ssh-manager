@@ -102,6 +102,29 @@ async function assertKey(sql: Sql, keyId: string | null) {
 	if (!k) throw new HttpError(422, "选择的云端密钥不存在");
 }
 
+const PUBKEY_RE = /^(ssh-(?:rsa|ed25519|dss)|ecdsa-sha2-nistp(?:256|384|521)|sk-[a-z0-9@.-]+) ([A-Za-z0-9+/]+={0,2})(?: [^\r\n]*)?$/;
+
+/** 校验 OpenSSH 公钥行并计算 SHA256 指纹（与 ssh-keygen -l 相同） */
+async function parsePublicKey(line: unknown): Promise<{ public_key: string; fingerprint: string } | null> {
+	if (line === undefined || line === null || line === "") return null;
+	if (typeof line !== "string" || line.length > 16000) throw new HttpError(422, "公钥格式不正确");
+	const text = line.trim();
+	const m = text.match(PUBKEY_RE);
+	if (!m) throw new HttpError(422, "公钥格式不正确，应为 ssh-ed25519 / ssh-rsa / ecdsa-… 开头的一行");
+	let blob: Uint8Array;
+	try {
+		blob = Uint8Array.from(atob(m[2]), (c) => c.charCodeAt(0));
+	} catch {
+		throw new HttpError(422, "公钥内容不是合法的 base64");
+	}
+	const len = blob.length >= 4 ? new DataView(blob.buffer).getUint32(0) : -1;
+	const type = len > 0 && len + 4 <= blob.length ? new TextDecoder().decode(blob.slice(4, 4 + len)) : "";
+	if (type !== m[1]) throw new HttpError(422, "公钥内容与类型不符");
+	const hash = new Uint8Array(await crypto.subtle.digest("SHA-256", blob));
+	const fingerprint = "SHA256:" + btoa(String.fromCharCode(...hash)).replace(/=+$/, "");
+	return { public_key: text, fingerprint };
+}
+
 function parseKey(b: any) {
 	const name = str(b?.name, "密钥名称", { required: true, re: ALIAS_RE, max: 64 })!;
 	const key_encrypted = str(b?.key_encrypted, "密钥密文", { required: true, re: SEALED_RE, max: MAX_SEALED })!;
@@ -112,7 +135,7 @@ function parseKey(b: any) {
 async function attachKeys(sql: Sql, servers: any[]) {
 	const ids = [...new Set(servers.map((s) => s.key_id).filter(Boolean))];
 	if (!ids.length) return;
-	const keys = await sql`select id, name, key_encrypted from ssh_keys where id = any(${ids})`;
+	const keys = await sql`select id, name, key_encrypted, public_key from ssh_keys where id = any(${ids})`;
 	const byId = new Map(keys.map((k: any) => [k.id, k]));
 	for (const s of servers) if (s.key_id) s.key = byId.get(s.key_id) ?? null;
 }
@@ -178,7 +201,7 @@ async function userApi(req: Request, sql: Sql, me: string, path: string[]): Prom
 			select alias, hostname, port, username, auth_type, identity_file, key_id, password_encrypted, proxy_jump,
 				environment, tags, location, description, created_at, updated_at
 			from servers order by alias`;
-		const keys = await sql`select id, name, key_encrypted from ssh_keys where id in (select key_id from servers where key_id is not null)`;
+		const keys = await sql`select id, name, key_encrypted, public_key from ssh_keys where id in (select key_id from servers where key_id is not null)`;
 		return json({ backup: backup.value, servers, keys });
 	}
 
@@ -270,16 +293,27 @@ async function userApi(req: Request, sql: Sql, me: string, path: string[]): Prom
 	if (a === "keys") {
 		if (!b && m === "GET") {
 			return json(await sql`
-				select k.id, k.name, k.comment, k.created_by, k.created_at,
+				select k.id, k.name, k.comment, k.public_key, k.fingerprint, k.created_by, k.created_at,
 					(select count(*)::int from servers s where s.key_id = k.id) as used_by
 				from ssh_keys k order by k.name`);
 		}
 		if (!b && m === "POST") {
-			const k = parseKey(await body(req));
+			const input = await body(req);
+			const k = parseKey(input);
+			const pub = await parsePublicKey(input.public_key);
 			const dup = await sql`select 1 from ssh_keys where name = ${k.name}`;
 			if (dup.length) throw new HttpError(409, `密钥名 ${k.name} 已存在`);
-			const [row] = await sql`insert into ssh_keys ${sql({ ...k, created_by: me } as any)} returning id, name, comment, created_by, created_at`;
+			const [row] = await sql`insert into ssh_keys ${sql({ ...k, ...(pub ?? {}), created_by: me } as any)}
+				returning id, name, comment, public_key, fingerprint, created_by, created_at`;
 			return json({ ...row, used_by: 0 }, 201);
+		}
+		if (b && m === "PUT") {
+			// 补填/更正公钥
+			const pub = await parsePublicKey((await body(req)).public_key);
+			if (!pub) throw new HttpError(422, "请提供公钥");
+			const [row] = await sql`update ssh_keys set ${sql(pub as any)} where id = ${b} returning id, name, public_key, fingerprint`;
+			if (!row) throw new HttpError(404, "密钥不存在");
+			return json(row);
 		}
 		if (b && m === "DELETE") {
 			const users = await sql`select alias from servers where key_id = ${b}`;
@@ -457,6 +491,14 @@ async function agentApi(req: Request, sql: Sql, path: string[]): Promise<Respons
 		if (!job) throw new HttpError(404, "任务不存在或已结束");
 
 		// 任务的副作用
+		if (input.public_keys && typeof input.public_keys === "object") {
+			// agent 从私钥推导出的公钥（云端缺失时才写入）
+			for (const [id, line] of Object.entries(input.public_keys)) {
+				if (!UUID_RE.test(id)) continue;
+				const pub = await parsePublicKey(line).catch(() => null);
+				if (pub) await sql`update ssh_keys set ${sql(pub as any)} where id = ${id} and public_key = ''`;
+			}
+		}
 		if (job.type === "import" && Array.isArray(input.import_rows)) {
 			const imported: string[] = [];
 			const errors: Record<string, string> = {};
@@ -468,7 +510,10 @@ async function agentApi(req: Request, sql: Sql, path: string[]): Promise<Respons
 							? { name: str(raw.key.name, "密钥名称", { required: true, re: ALIAS_RE, max: 64 })! }
 							: parseKey(raw.key);
 						let [row] = await sql`select id from ssh_keys where name = ${k.name}`;
-						if (!row && !raw.key.existing) [row] = await sql`insert into ssh_keys ${sql({ ...(k as any), created_by: job.created_by })} returning id`;
+						if (!row && !raw.key.existing) {
+							const pub = await parsePublicKey(raw.key.public_key).catch(() => null);
+							[row] = await sql`insert into ssh_keys ${sql({ ...(k as any), ...(pub ?? {}), created_by: job.created_by })} returning id`;
+						}
 						if (!row) throw new HttpError(422, `云端密钥 ${k.name} 不存在`);
 						raw.key_id = row.id;
 					}

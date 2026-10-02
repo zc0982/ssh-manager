@@ -23,7 +23,7 @@ export type Server = {
 /** 环境即服务器分组 */
 export type Environment = { name: string; label: string; color: string; description: string; sort_order: number; server_count: number };
 
-export type SshKey = { id: string; name: string; comment: string; created_at: string; used_by: number };
+export type SshKey = { id: string; name: string; comment: string; public_key: string; fingerprint: string; created_at: string; used_by: number };
 
 export type Agent = { id: string; name: string; hostname: string; last_seen: string; online: boolean };
 

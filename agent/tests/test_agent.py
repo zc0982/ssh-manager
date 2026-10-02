@@ -323,3 +323,43 @@ def test_setup_pairing_url_rejected(tmp_path, monkeypatch):
     with pytest.raises(SystemExit):
         wizard.run_setup("https://x.example/pair/x/bundle", tmp_path / "k.pem", SKILL_DIR, "x", lambda: None)
     assert not (tmp_path / "k.pem").exists()
+
+
+def _keygen(tmp_path, name, *args):
+    path = tmp_path / name
+    subprocess.run(["ssh-keygen", "-q", "-N", "", "-C", "", "-f", str(path), *args], check=True)
+    want = subprocess.run(["ssh-keygen", "-y", "-f", str(path)], capture_output=True, text=True, check=True).stdout.split()[:2]
+    return path.read_bytes(), " ".join(want)
+
+
+@pytest.mark.skipif(not shutil.which("ssh-keygen"), reason="需要 ssh-keygen")
+@pytest.mark.parametrize("fmt", [("ed25519", ["-t", "ed25519"]), ("rsa-pem", ["-t", "rsa", "-b", "2048", "-m", "PEM"])])
+def test_public_key_derived_written_and_reported(env, tmp_path, fmt):
+    from ssh_agent.keys import public_key_line
+    h, keys, cfg = env
+    data, want = _keygen(tmp_path, fmt[0], *fmt[1])
+    assert public_key_line(data) == want  # 与 ssh-keygen -y 一致
+
+    s = server(key_id="k1", key={"id": "k1", "name": "deploy", "key_encrypted": keys.seal(data), "public_key": ""})
+    result, extra = h.handle({"type": "sync", "server": s, "payload": {}})
+    assert result["success"], result
+    pub_file = h.skill.home / ".ssh" / "ssh-manager" / "deploy.key.pub"
+    assert pub_file.read_text().split()[:2] == want.split()
+    assert extra["public_keys"]["k1"].split()[:2] == want.split()  # 回报给云端
+
+    # 云端已有公钥时直接使用，不再回报
+    s2 = server(key_id="k1", updated_at="x", key={"id": "k1", "name": "deploy", "key_encrypted": keys.seal(data), "public_key": want + " from-cloud"})
+    result, extra = h.handle({"type": "sync", "server": s2, "payload": {}})
+    assert "public_keys" not in extra and pub_file.read_text() == want + " from-cloud\n"
+
+
+@pytest.mark.skipif(not shutil.which("ssh-keygen"), reason="需要 ssh-keygen")
+def test_import_includes_public_key(env, tmp_path):
+    h, keys, cfg = env
+    data, want = _keygen(tmp_path, "id_test", "-t", "ed25519")
+    keyfile = h.skill.home / ".ssh" / "id_test"
+    keyfile.write_bytes(data)
+    with cfg.open("a") as f:
+        f.write(f"Host a1\n    HostName 10.0.0.1\n    User u\n    IdentityFile {keyfile}\n\n")
+    _, extra = h.handle({"type": "import", "servers": [], "keys": [], "payload": {"aliases": ["a1"], "upload_keys": True}})
+    assert extra["import_rows"][0]["key"]["public_key"].split()[:2] == want.split()

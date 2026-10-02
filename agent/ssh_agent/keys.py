@@ -15,6 +15,19 @@ AAD_V2 = b"ssh-manager-bundle-v2"
 OAEP = padding.OAEP(mgf=padding.MGF1(algorithm=hashes.SHA256()), algorithm=hashes.SHA256(), label=None)
 
 
+def public_key_line(private_key: bytes, comment: str = "") -> str | None:
+    """从私钥（OpenSSH 或 PEM 格式，不带口令）推导 OpenSSH 公钥行；失败返回 None。"""
+    try:
+        if b"OPENSSH PRIVATE KEY" in private_key:
+            key = serialization.load_ssh_private_key(private_key, password=None)
+        else:
+            key = serialization.load_pem_private_key(private_key, password=None)
+        line = key.public_key().public_bytes(serialization.Encoding.OpenSSH, serialization.PublicFormat.OpenSSH).decode()
+    except Exception:
+        return None
+    return f"{line} {comment}".strip() if comment else line
+
+
 def _b64url_uint(n: int) -> str:
     raw = n.to_bytes((n.bit_length() + 7) // 8, "big")
     return base64.urlsafe_b64encode(raw).rstrip(b"=").decode()

@@ -3,7 +3,7 @@ import os
 import re
 from pathlib import Path
 
-from .keys import KeyPair
+from .keys import KeyPair, public_key_line
 from .skill import ALIAS_RE, SkillBridge, SkillError
 
 TEST_COMMAND = "hostname && uptime && (uname -sr || true)"
@@ -15,16 +15,21 @@ class Handlers:
         self.skill = skill
         self.keys = keys
         self._synced: dict[str, str] = {}  # alias -> 已同步的 server.updated_at
+        self._derived: dict[str, str] = {}  # key_id -> 本次推导出的公钥（云端缺失时回报）
 
     def handle(self, job: dict) -> tuple[dict, dict]:
         fn = getattr(self, f"do_{job['type']}", None)
         if fn is None:
             return {"success": False, "error": f"agent 不支持的任务类型：{job['type']}"}, {}
+        self._derived = {}
         try:
             out = fn(job)
         except (SkillError, RuntimeError, KeyError, ValueError) as e:
             return {"success": False, "error": str(e)}, {}
-        return out if isinstance(out, tuple) else (out, {})
+        result, extra = out if isinstance(out, tuple) else (out, {})
+        if self._derived:
+            extra = {**extra, "public_keys": self._derived}
+        return result, extra
 
     # ---------- 同步 ----------
 
@@ -46,6 +51,17 @@ class Handlers:
             with os.fdopen(fd, "wb") as f:
                 f.write(data)
             os.replace(tmp, path)
+        # 公钥：云端有就用云端的，没有就从私钥推导并回报给云端
+        pub = key.get("public_key") or ""
+        if not pub:
+            pub = public_key_line(data, key["name"]) or ""
+            if pub and key.get("id"):
+                self._derived[key["id"]] = pub
+        if pub:
+            pub_path = path.with_name(path.name + ".pub")
+            if not pub_path.exists() or pub_path.read_text() != pub + "\n":
+                pub_path.write_text(pub + "\n")
+                os.chmod(pub_path, 0o644)
         return path
 
     def _sync(self, server: dict) -> dict:
@@ -187,4 +203,6 @@ class Handlers:
         while name in cloud_keys:
             name, n = f"{base}-{n}", n + 1
         cloud_keys[name] = data  # 同一批次中其他主机引用同一文件时复用
-        return {"name": name, "comment": f"从 {identity_file} 导入", "key_encrypted": self.keys.seal(data)}
+        pub_file = path.with_name(path.name + ".pub")
+        pub = pub_file.read_text().strip() if pub_file.is_file() else (public_key_line(data) or "")
+        return {"name": name, "comment": f"从 {identity_file} 导入", "key_encrypted": self.keys.seal(data), "public_key": pub}

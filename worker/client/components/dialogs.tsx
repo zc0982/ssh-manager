@@ -1,4 +1,4 @@
-import { CopyIcon, DownloadIcon, KeyRoundIcon, Trash2Icon } from "lucide-react";
+import { CopyIcon, DownloadIcon, KeyRoundIcon, PlusIcon, Trash2Icon } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
@@ -13,6 +13,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { Textarea } from "@/components/ui/textarea";
 import { api, fmtTime, runJob, type SshKey, type Status } from "@/lib/api";
 import { sealData } from "@/lib/crypto";
+import { derivePublicKey } from "@/lib/sshkey";
 import { type Backup, buildSyncScript, type ExportKey, type ExportServer, type SyncResult, unlockAgentKey, windowsOneLiner } from "@/lib/restore";
 import { Field } from "./server-form";
 
@@ -26,6 +27,8 @@ export function KeysDialog({ open, onOpenChange, keys, publicKey, onChanged }: O
 	const [name, setName] = useState("");
 	const [comment, setComment] = useState("");
 	const [text, setText] = useState("");
+	const [pubText, setPubText] = useState("");
+	const [fillFor, setFillFor] = useState<{ id: string; value: string } | null>(null);
 	const [error, setError] = useState("");
 	const [busy, setBusy] = useState(false);
 	const fileRef = useRef<HTMLInputElement>(null);
@@ -41,9 +44,15 @@ export function KeysDialog({ open, onOpenChange, keys, publicKey, onChanged }: O
 			if (!/-----BEGIN [A-Z ]*PRIVATE KEY-----/.test(content)) throw new Error("看起来不是私钥文件（缺少 BEGIN ... PRIVATE KEY）");
 			if (/Proc-Type: 4,ENCRYPTED|BEGIN ENCRYPTED PRIVATE KEY/.test(content)) throw new Error("暂不支持带口令的私钥");
 			if (bytes.length > 64 * 1024) throw new Error("文件过大");
+			// 公钥：优先用户提供的 .pub，否则从私钥提取（只读公开部分）
+			const derived = derivePublicKey(content);
+			const given = pubText.trim().split("\n")[0]?.trim() || "";
+			if (given && derived && given.split(/\s+/).slice(0, 2).join(" ") !== derived) throw new Error("提供的公钥与私钥不匹配");
+			const public_key = given || (derived ? `${derived} ${name}` : "");
 			const key_encrypted = await sealData(publicKey, bytes);
-			await api("/api/keys", { method: "POST", body: { name, comment: comment.trim(), key_encrypted } });
-			setName(""); setComment(""); setText("");
+			await api("/api/keys", { method: "POST", body: { name, comment: comment.trim(), key_encrypted, public_key } });
+			if (!public_key) toast.warning("没能从这种格式的私钥里提取公钥，可以稍后在列表里补填，或等 agent 同步时自动补上");
+			setName(""); setComment(""); setText(""); setPubText("");
 			if (fileRef.current) fileRef.current.value = "";
 			toast.success(`已加密上传 ${name}`);
 			onChanged();
@@ -52,6 +61,16 @@ export function KeysDialog({ open, onOpenChange, keys, publicKey, onChanged }: O
 		} finally {
 			setBusy(false);
 		}
+	}
+
+	async function savePub() {
+		if (!fillFor) return;
+		try {
+			await api(`/api/keys/${fillFor.id}`, { method: "PUT", body: { public_key: fillFor.value.trim() } });
+			setFillFor(null);
+			toast.success("已保存公钥");
+			onChanged();
+		} catch (e: any) { toast.error(e.message); }
 	}
 
 	async function remove(k: SshKey) {
@@ -69,21 +88,38 @@ export function KeysDialog({ open, onOpenChange, keys, publicKey, onChanged }: O
 				<DialogHeader>
 					<DialogTitle>云端 SSH 密钥</DialogTitle>
 					<DialogDescription>
-						私钥在浏览器里用本机 agent 的公钥加密后才上传，云端只保存密文。同步时由 agent 解密写到
-						<code className="mx-1 rounded bg-muted px-1 text-xs">~/.ssh/ssh-manager/&lt;名称&gt;.key</code>（权限 600）。暂不支持带口令的私钥。
+						私钥在浏览器里用本机 agent 的公钥加密后才上传，云端只保存密文；公钥明文保存，方便复制到服务器的 authorized_keys。同步时写到
+						<code className="mx-1 rounded bg-muted px-1 text-xs">~/.ssh/ssh-manager/&lt;名称&gt;.key</code>（600）和同名 <code className="rounded bg-muted px-1 text-xs">.key.pub</code>。暂不支持带口令的私钥。
 					</DialogDescription>
 				</DialogHeader>
 				{keys.length ? (
 					<ScrollArea className="max-h-56 rounded-md border">
 						<Table>
-							<TableHeader><TableRow><TableHead>名称</TableHead><TableHead>说明</TableHead><TableHead>使用中</TableHead><TableHead>上传时间</TableHead><TableHead /></TableRow></TableHeader>
+							<TableHeader><TableRow><TableHead>名称</TableHead><TableHead>公钥指纹</TableHead><TableHead>使用中</TableHead><TableHead /></TableRow></TableHeader>
 							<TableBody>
 								{keys.map((k) => (
 									<TableRow key={k.id}>
-										<TableCell className="font-mono text-xs">{k.name}</TableCell>
-										<TableCell className="max-w-48 truncate">{k.comment}</TableCell>
+										<TableCell className="max-w-40">
+											<div className="truncate font-mono text-xs" title={k.name}>{k.name}</div>
+											<div className="truncate text-xs text-muted-foreground" title={k.comment}>{k.comment || fmtTime(k.created_at)}</div>
+										</TableCell>
+										<TableCell className="max-w-56">
+											{k.public_key ? (
+												<div className="flex items-center gap-1">
+													<span className="truncate font-mono text-xs text-muted-foreground" title={k.public_key}>{k.fingerprint}</span>
+													<Button variant="ghost" size="icon-sm" title="复制公钥（可加到服务器的 authorized_keys）" onClick={() => copy(k.public_key, "公钥已复制")}><CopyIcon /></Button>
+												</div>
+											) : fillFor?.id === k.id ? (
+												<div className="flex items-center gap-1">
+													<Input className="h-7 font-mono text-xs" placeholder="ssh-ed25519 AAAA…" autoFocus value={fillFor.value}
+														onChange={(e) => setFillFor({ id: k.id, value: e.target.value })} onKeyDown={(e) => { if (e.key === "Enter") savePub(); }} />
+													<Button size="xs" onClick={savePub}>保存</Button>
+												</div>
+											) : (
+												<Button variant="outline" size="xs" onClick={() => setFillFor({ id: k.id, value: "" })}><PlusIcon />补填公钥</Button>
+											)}
+										</TableCell>
 										<TableCell>{k.used_by} 台</TableCell>
-										<TableCell className="text-muted-foreground">{fmtTime(k.created_at)}</TableCell>
 										<TableCell className="text-right">
 											<Button variant="ghost" size="icon-sm" disabled={k.used_by > 0} title={k.used_by ? "仍有服务器在使用" : "删除"} onClick={() => remove(k)}>
 												<Trash2Icon />
@@ -107,6 +143,15 @@ export function KeysDialog({ open, onOpenChange, keys, publicKey, onChanged }: O
 					</Field>
 					<Field label="或直接粘贴" className="sm:col-span-2">
 						<Textarea rows={4} className="font-mono text-xs" placeholder="-----BEGIN OPENSSH PRIVATE KEY-----" value={text} onChange={(e) => setText(e.target.value)} />
+					</Field>
+					<Field label="公钥（可选，留空则自动从私钥提取）" className="sm:col-span-2">
+						<div className="flex gap-2">
+							<Input className="font-mono text-xs" placeholder="ssh-ed25519 AAAA… 或选择 .pub 文件" value={pubText} onChange={(e) => setPubText(e.target.value)} />
+							<Input type="file" accept=".pub" className="w-40" onChange={async (e) => {
+								const f = e.target.files?.[0];
+								if (f) setPubText((await f.text()).trim());
+							}} />
+						</div>
 					</Field>
 				</div>
 				{error && <p className="text-sm text-destructive">{error}</p>}
