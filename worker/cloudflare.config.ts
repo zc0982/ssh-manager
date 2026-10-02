@@ -19,6 +19,8 @@ export default defineConfig({
 			ACCESS_AUD: bindings.secret(),
 			ALLOWED_EMAILS: bindings.secret(),
 			AGENT_CLIENT_ID: bindings.secret(),
+			// 仅本地预览：SSH_MANAGER_DEV=1 cf dev 时以 .dev.vars 里的 DEV_EMAIL 登录（只对 localhost 生效）
+			...((globalThis as any).process?.env?.SSH_MANAGER_DEV === "1" ? { DEV_EMAIL: bindings.secret() } : {}),
 		},
 	},
 });

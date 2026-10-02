@@ -11,7 +11,7 @@ SSH 连接管理系统：服务器清单存在云端，网页托管在 Cloudflar
                                           └──▶ ~/.ssh/config（同步服务器配置）
 ```
 
-- **worker/**：Cloudflare Worker，同时提供静态网页（Workers Static Assets）和 `/api/*`，通过 Hyperdrive 连接 Supabase Postgres。
+- **worker/**：Cloudflare Worker，同时提供静态网页（Workers Static Assets）和 `/api/*`，通过 Hyperdrive 连接 Supabase Postgres。前端是 React + Tailwind + [shadcn/ui](https://ui.shadcn.com)（`worker/client/`，组件在 `client/components/ui/`，用 `npx shadcn@latest add <组件>` 添加）。
 - **agent/**：运行在本机的 Python 程序。从 Worker 领取任务（测试连接、执行命令、传输文件、隧道、同步配置……），调用 `~/.claude/skills/ssh-skill/scripts/*.py` 执行，不直接调用 ssh/scp。
 - **db/migrations/**：数据库表结构。
 
@@ -86,6 +86,12 @@ SSH 连接管理系统：服务器清单存在云端，网页托管在 Cloudflar
 ## 开发
 
 ```bash
-cd agent && uv run pytest -q        # agent 测试（不会改动真实的 ~/.ssh/config）
-cd worker && npx tsc && cf build    # Worker 类型检查与构建
+cd agent && uv run pytest -q          # agent 测试（不会改动真实的 ~/.ssh/config）
+cd worker && npx tsc -b && cf build   # Worker + 前端类型检查与构建
+```
+
+本地预览前端（`localhost` 上以 `.dev.vars` 里的 `DEV_EMAIL` 身份登录，线上不会声明这个绑定）：
+
+```bash
+cd worker && SSH_MANAGER_DEV=1 DEV_DATABASE_URL='postgres://…' cf dev
 ```
