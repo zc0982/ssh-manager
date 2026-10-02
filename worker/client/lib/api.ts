@@ -13,6 +13,7 @@ export type Server = {
 	location: string;
 	description: string;
 	has_password: boolean;
+	host_keys: string[];
 	last_synced_at: string | null;
 	last_connected_at: string | null;
 	last_status: "ok" | "error" | null;

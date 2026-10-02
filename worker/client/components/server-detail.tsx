@@ -15,6 +15,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { api, type Environment, fmtTime, type Job, type JobResult, runJob, type Server, type SshKey } from "@/lib/api";
 import { EnvBadge } from "./environments-dialog";
+import { HostKeyFact, isHostKeyError, TrustHostKeyDialog } from "./host-keys";
 import { cn } from "@/lib/utils";
 import { Field } from "./server-form";
 
@@ -30,6 +31,7 @@ export function ServerDetail({ server, keys, envs, onEdit, onChanged, onDeleted 
 	const [lines, setLines] = useState<Line[]>(() => termStore.get(server.id) ?? []);
 	const [testing, setTesting] = useState(false);
 	const [syncing, setSyncing] = useState(false);
+	const [trustOpen, setTrustOpen] = useState(false);
 
 	useEffect(() => setLines(termStore.get(server.id) ?? []), [server.id]);
 
@@ -53,7 +55,10 @@ export function ServerDetail({ server, keys, envs, onEdit, onChanged, onDeleted 
 			const r = await runJob("test", { serverId: server.id });
 			append(server.id, resultLines(r));
 			if (r.success) toast.success(`连接成功 · ${r.duration_ms}ms`);
-			else toast.error(`连接失败：${r.error || r.stderr || "未知错误"}`);
+			else if (isHostKeyError(`${r.error ?? ""} ${r.stderr ?? ""}`)) {
+				toast.error("连接失败：还没有信任这台服务器的主机指纹", { action: { label: "去信任", onClick: () => setTrustOpen(true) } });
+				setTrustOpen(true);
+			} else toast.error(`连接失败：${r.error || r.stderr || "未知错误"}`);
 		} catch (e: any) { toast.error(e.message); } finally { setTesting(false); onChanged(); }
 	}
 
@@ -125,6 +130,7 @@ export function ServerDetail({ server, keys, envs, onEdit, onChanged, onDeleted 
 						{server.last_status && <span className={server.last_status === "ok" ? "text-emerald-600" : "text-destructive"}>{server.last_status}</span>}
 					</Fact>
 					<Fact label="最近同步到本机">{fmtTime(server.last_synced_at)}</Fact>
+					<Fact label="主机指纹" className="col-span-2"><HostKeyFact server={server} onTrust={() => setTrustOpen(true)} /></Fact>
 					{server.description && <Fact label="备注" className="col-span-2 md:col-span-3">{server.description}</Fact>}
 				</CardContent>
 			</Card>
@@ -141,6 +147,7 @@ export function ServerDetail({ server, keys, envs, onEdit, onChanged, onDeleted 
 				<TabsContent value="tunnels"><TunnelsTab server={server} /></TabsContent>
 				<TabsContent value="logs"><LogsTab server={server} /></TabsContent>
 			</Tabs>
+			<TrustHostKeyDialog server={server} open={trustOpen} onOpenChange={setTrustOpen} onDone={onChanged} />
 		</div>
 	);
 }

@@ -22,8 +22,8 @@ const AGENT_ONLINE_MS = 60_000;
 const POLL_WAIT_MS = 20_000;
 
 // 网页可以提交的任务类型；需要绑定服务器的类型在 SERVER_JOBS 中
-const USER_JOBS = new Set(["test", "exec", "upload", "download", "tunnel_start", "tunnel_stop", "tunnel_list", "sync", "sync_all", "local_list", "import"]);
-const SERVER_JOBS = new Set(["test", "exec", "upload", "download", "tunnel_start", "sync"]);
+const USER_JOBS = new Set(["scan_host_key", "test", "exec", "upload", "download", "tunnel_start", "tunnel_stop", "tunnel_list", "sync", "sync_all", "local_list", "import"]);
+const SERVER_JOBS = new Set(["scan_host_key", "test", "exec", "upload", "download", "tunnel_start", "sync"]);
 
 class HttpError extends Error {
 	constructor(public status: number, message: string) {
@@ -140,6 +140,9 @@ async function attachKeys(sql: Sql, servers: any[]) {
 	for (const s of servers) if (s.key_id) s.key = byId.get(s.key_id) ?? null;
 }
 
+const HOSTKEY_RE = /^(\S+) ((?:ssh-|ecdsa-|sk-)\S+) ([A-Za-z0-9+/]+={0,2})$/;
+const knownHostsPattern = (hostname: string, port: number) => (port === 22 ? hostname : `[${hostname}]:${port}`);
+
 function publicServer(s: any) {
 	const { password_encrypted, ...rest } = s;
 	return { ...rest, has_password: !!password_encrypted };
@@ -199,7 +202,7 @@ async function userApi(req: Request, sql: Sql, me: string, path: string[]): Prom
 		if (!backup) throw new HttpError(404, "还没有备份，请先在已在用的电脑上运行 ./setup.sh backup");
 		const servers = await sql`
 			select alias, hostname, port, username, auth_type, identity_file, key_id, password_encrypted, proxy_jump,
-				environment, tags, location, description, created_at, updated_at
+				environment, tags, location, description, host_keys, created_at, updated_at
 			from servers order by alias`;
 		const keys = await sql`select id, name, key_encrypted, public_key from ssh_keys where id in (select key_id from servers where key_id is not null)`;
 		return json({ backup: backup.value, servers, keys });
@@ -340,6 +343,22 @@ async function userApi(req: Request, sql: Sql, me: string, path: string[]): Prom
 			return json({ server: publicServer(row), job }, 201);
 		}
 
+		if (b && c === "host-keys" && m === "PUT") {
+			const [server] = await sql`select id, alias, hostname, port from servers where id = ${b}`;
+			if (!server) throw new HttpError(404, "服务器不存在");
+			const { lines } = await body(req);
+			if (!Array.isArray(lines) || lines.length > 10) throw new HttpError(422, "lines 格式不正确");
+			const pattern = knownHostsPattern(server.hostname, server.port);
+			const clean = [...new Set(lines.map((l: unknown) => String(l).trim()))];
+			for (const l of clean) {
+				const mm = l.match(HOSTKEY_RE);
+				if (!mm || mm[1] !== pattern) throw new HttpError(422, `主机公钥与服务器地址 ${pattern} 不符`);
+			}
+			const [row] = await sql`update servers set host_keys = ${clean} where id = ${b} returning *`;
+			const job = clean.length ? await enqueue(sql, me, "sync", row) : null;
+			return json({ server: publicServer(row), job });
+		}
+
 		if (b && !c) {
 			const [existing] = await sql`select * from servers where id = ${b}`;
 			if (!existing) throw new HttpError(404, "服务器不存在");
@@ -360,7 +379,9 @@ async function userApi(req: Request, sql: Sql, me: string, path: string[]): Prom
 					const dup = await sql`select 1 from servers where alias = ${s.alias} and id <> ${b}`;
 					if (dup.length) throw new HttpError(409, `别名 ${s.alias} 已存在`);
 				}
-				const [row] = await sql`update servers set ${sql({ ...s, password_encrypted: enc } as any)} where id = ${b} returning *`;
+				// 地址或端口变了，之前信任的主机公钥不再适用
+				const addrChanged = s.hostname !== existing.hostname || s.port !== existing.port;
+				const [row] = await sql`update servers set ${sql({ ...s, password_encrypted: enc, ...(addrChanged ? { host_keys: [] } : {}) } as any)} where id = ${b} returning *`;
 				if (s.alias !== existing.alias) await enqueue(sql, me, "remove_local", null, { alias: existing.alias });
 				const job = await enqueue(sql, me, "sync", row);
 				return json({ server: publicServer(row), job });

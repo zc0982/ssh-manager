@@ -8,6 +8,7 @@ export type ExportServer = {
 	alias: string; hostname: string; port: number; username: string; auth_type: "key" | "password";
 	identity_file: string | null; key_id: string | null; password_encrypted: string | null; proxy_jump: string | null;
 	environment: string; tags: string[]; location: string; description: string; created_at: string; updated_at: string;
+	host_keys?: string[];
 };
 export type ExportKey = { id: string; name: string; key_encrypted: string; public_key?: string };
 
@@ -89,13 +90,16 @@ function delimiter(content: string) {
 export type Platform = "posix" | "windows";
 export type SyncResult = { script: string; servers: number; keyFiles: number; skipped: string[]; platform: Platform };
 
-type Prepared = { blocks: string[]; aliases: string[]; keys: Map<string, Uint8Array>; pubs: Map<string, string>; skipped: string[] };
+type Prepared = { blocks: string[]; aliases: string[]; keys: Map<string, Uint8Array>; pubs: Map<string, string>; hostKeys: Map<string, string[]>; skipped: string[] };
+
+const HOSTKEY_RE = /^(\S+) ((?:ssh-|ecdsa-|sk-)\S+) ([A-Za-z0-9+/]+={0,2})$/;
 
 /** 解密全部服务器与密钥，生成 ssh-skill 格式的配置块 */
 async function prepare(priv: CryptoKey, servers: ExportServer[], keys: ExportKey[]): Promise<Prepared> {
 	const keyById = new Map(keys.map((k) => [k.id, k]));
 	const used = new Map<string, Uint8Array>();
 	const pubs = new Map<string, string>();
+	const hostKeys = new Map<string, string[]>(); // known_hosts 主机写法 -> 已信任的主机公钥行
 	const blocks: string[] = [];
 	const aliases: string[] = [];
 	const skipped: string[] = [];
@@ -121,12 +125,38 @@ async function prepare(priv: CryptoKey, servers: ExportServer[], keys: ExportKey
 		}
 		aliases.push(s.alias);
 		blocks.push(hostBlock(s, password, identity));
+		const pattern = s.port === 22 ? s.hostname : `[${s.hostname}]:${s.port}`;
+		// 主机名会放进脚本的单引号里，只接受安全字符
+		const lines = /^[A-Za-z0-9.:_-]+$/.test(s.hostname) ? (s.host_keys ?? []).filter((l) => HOSTKEY_RE.exec(l)?.[1] === pattern) : [];
+		if (lines.length) hostKeys.set(pattern, lines);
 	}
-	return { blocks, aliases, keys: used, pubs, skipped };
+	return { blocks, aliases, keys: used, pubs, hostKeys, skipped };
 }
 
 const doneMsg = (p: Prepared, where: string) =>
 	`SSH Manager：已同步 ${p.aliases.length} 台服务器、${p.keys.size} 个私钥到 ${where}（原配置备份为 config.ssh-manager.bak）`;
+
+/** 已信任的主机公钥写入 known_hosts（ssh-skill 严格校验主机密钥） */
+function knownHostsPosix(p: Prepared) {
+	if (!p.hostKeys.size) return "";
+	const cmds = [...p.hostKeys].map(([pattern, lines]) =>
+		`ssh-keygen -R '${pattern}' -f "$KH" >/dev/null 2>&1 || true\nprintf '%s\\n' ${lines.map((l) => `'${l}'`).join(" ")} >> "$KH"`);
+	return `KH="$SSH/known_hosts"; touch "$KH"\n${cmds.join("\n")}\nchmod 600 "$KH"\n`;
+}
+
+function knownHostsWindows(p: Prepared) {
+	if (!p.hostKeys.size) return "";
+	const patterns = [...p.hostKeys.keys()].map((k) => `'${k} '`).join(", ");
+	const lines = [...p.hostKeys.values()].flat().map((l) => `'${l}'`).join(", ");
+	return `$kh = Join-Path $ssh 'known_hosts'
+$khLines = @()
+if (Test-Path $kh) { $khLines = @([IO.File]::ReadAllText($kh) -split "\\r?\\n" | Where-Object { $_ -ne '' }) }
+$drop = @(${patterns})
+$khLines = @($khLines | Where-Object { $l = $_; -not ($drop | Where-Object { $l.StartsWith($_) }) }) + @(${lines})
+[IO.File]::WriteAllText($kh, (($khLines -join "\`n") + "\`n"), $utf8)
+Protect-SshFile $kh
+`;
+}
 
 /** macOS / Linux：bash 脚本，`pbpaste | bash` 运行 */
 function renderPosix(p: Prepared): string {
@@ -170,7 +200,7 @@ cat >> "$CFG.tmp" <<'${cd}'
 ${cfgText}
 ${cd}
 mv "$CFG.tmp" "$CFG"; chmod 600 "$CFG"
-command -v pbcopy >/dev/null 2>&1 && pbcopy </dev/null || true
+${knownHostsPosix(p)}command -v pbcopy >/dev/null 2>&1 && pbcopy </dev/null || true
 echo "${doneMsg(p, "~/.ssh")}"
 `;
 }
@@ -237,7 +267,7 @@ ${p.blocks.join("\n\n")}
 $text += "\`n"
 [IO.File]::WriteAllText($cfg, $text, $utf8)
 Protect-SshFile $cfg
-try { Set-Clipboard -Value $null } catch { try { Set-Clipboard -Value ' ' } catch { } }
+${knownHostsWindows(p)}try { Set-Clipboard -Value $null } catch { try { Set-Clipboard -Value ' ' } catch { } }
 # 如果是在 PowerShell 里粘贴运行的，把这条含密文的命令从 PSReadLine 历史文件里删掉
 try {
   $hp = Join-Path $env:APPDATA 'Microsoft\\Windows\\PowerShell\\PSReadLine\\ConsoleHost_history.txt'

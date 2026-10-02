@@ -1,6 +1,10 @@
 """任务处理：每种任务类型对应一个函数，返回 (result, extra)，extra 会合并进回传给 Worker 的请求体。"""
+import base64
+import hashlib
 import os
 import re
+import shutil
+import subprocess
 from pathlib import Path
 
 from .keys import KeyPair, public_key_line
@@ -8,6 +12,20 @@ from .skill import ALIAS_RE, SkillBridge, SkillError
 
 TEST_COMMAND = "hostname && uptime && (uname -sr || true)"
 MAX_KEY_FILE = 64 * 1024
+HOSTKEY_RE = re.compile(r"^(\S+) ((?:ssh-|ecdsa-|sk-)\S+) ([A-Za-z0-9+/]+={0,2})$")
+
+
+def known_hosts_pattern(hostname: str, port: int) -> str:
+    """known_hosts 里的主机写法：22 端口直接写主机名，其他端口写 [主机]:端口"""
+    return hostname if int(port or 22) == 22 else f"[{hostname}]:{int(port)}"
+
+
+def host_key_fingerprint(line: str) -> dict | None:
+    m = HOSTKEY_RE.match(line.strip())
+    if not m:
+        return None
+    digest = hashlib.sha256(base64.b64decode(m.group(3))).digest()
+    return {"type": m.group(2), "fingerprint": "SHA256:" + base64.b64encode(digest).decode().rstrip("=")}
 
 
 class Handlers:
@@ -70,8 +88,32 @@ class Handlers:
         elif server.get("key_id") and not server.get("key"):
             raise RuntimeError("服务器引用的云端密钥不存在")
         r = self.skill.sync_server(server, self._password(server))
+        if server.get("host_keys"):
+            self._trust_host_keys(server)
         self._synced[server["alias"]] = server["updated_at"]
         return r
+
+    def _trust_host_keys(self, server: dict) -> None:
+        """把云端已确认的主机公钥写进 ~/.ssh/known_hosts（ssh-skill 严格校验主机密钥）。"""
+        pattern = known_hosts_pattern(server["hostname"], server.get("port") or 22)
+        lines = []
+        for line in server["host_keys"]:
+            m = HOSTKEY_RE.match(line.strip())
+            if not m or m.group(1) != pattern:
+                raise RuntimeError(f"主机公钥与服务器地址不符：{line[:60]}")
+            lines.append(line.strip())
+        kh = self.skill.home / ".ssh" / "known_hosts"
+        existing = kh.read_text().splitlines() if kh.exists() else []
+        if all(l in existing for l in lines):
+            return
+        if kh.exists() and shutil.which("ssh-keygen"):
+            # 先删掉这个主机的旧记录（含哈希过的条目），会留下 known_hosts.old 备份
+            subprocess.run(["ssh-keygen", "-R", pattern, "-f", str(kh)], capture_output=True)
+            existing = kh.read_text().splitlines() if kh.exists() else []
+        existing = [l for l in existing if not l.startswith(pattern + " ")]
+        kh.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        kh.write_text("\n".join(existing + lines) + "\n")
+        os.chmod(kh, 0o600)
 
     def _ensure_synced(self, job: dict) -> dict:
         server = job.get("server")
@@ -105,6 +147,25 @@ class Handlers:
             raise RuntimeError("非法别名")
         self._synced.pop(alias, None)
         return {"success": True, "removed": self.skill.remove_server(alias)}
+
+    # ---------- 主机指纹 ----------
+
+    def do_scan_host_key(self, job):
+        s = self._ensure_server(job)
+        if s.get("proxy_jump"):
+            raise RuntimeError("经跳板机连接的服务器暂不支持自动获取指纹，请在跳板机上运行 ssh-keyscan 后手动确认")
+        if not shutil.which("ssh-keyscan"):
+            raise RuntimeError("本机没有 ssh-keyscan（OpenSSH 客户端）")
+        port = int(s.get("port") or 22)
+        p = subprocess.run(["ssh-keyscan", "-T", "8", "-p", str(port), "--", s["hostname"]],
+                           capture_output=True, text=True, timeout=30)
+        pattern = known_hosts_pattern(s["hostname"], port)
+        lines = sorted({l.strip() for l in p.stdout.splitlines() if l.strip() and not l.startswith("#")})
+        lines = [l for l in lines if HOSTKEY_RE.match(l) and HOSTKEY_RE.match(l).group(1) == pattern]
+        if not lines:
+            err = (p.stderr or "").strip().splitlines()
+            raise RuntimeError("没有获取到主机公钥：" + (err[-1] if err else f"{s['hostname']}:{port} 无响应或不是 SSH 服务"))
+        return {"success": True, "lines": lines, "fingerprints": [host_key_fingerprint(l) for l in lines]}
 
     # ---------- 远程操作 ----------
 

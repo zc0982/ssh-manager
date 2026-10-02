@@ -26,6 +26,7 @@ SSH 连接管理系统：服务器清单存在云端，网页托管在 Cloudflar
 | 从本机导入 | 把 `~/.ssh/config` 里已有的主机导入云端，可同时把它们使用的私钥文件加密上传 |
 | 云端 SSH 密钥 | 在网页上传私钥（浏览器端加密），多台服务器可共用；公钥自动从私钥提取（也可手动提供 `.pub`），明文保存并显示 SHA256 指纹，可一键复制到服务器的 `authorized_keys`。同步时写到 `~/.ssh/ssh-manager/<名称>.key`（600）和 `<名称>.key.pub`。换电脑不用再拷密钥 |
 | agent 私钥云端备份 | `backup-key` 用主密码加密后存到云端，新电脑上 `restore-key` 恢复 |
+| 主机指纹信任 | ssh-skill 严格校验主机密钥，从没连过的设备要先信任主机指纹：agent 用 `ssh-keyscan` 读取（不登录），网页显示 SHA256 指纹确认后保存到云端，每台电脑同步时写入 `~/.ssh/known_hosts`。agent 连不到时可粘贴其他电脑上 `ssh-keyscan` 的输出；指纹变化会醒目提示 |
 | 测试连接 / 执行命令 | `ssh_execute.py`，支持超时、只读重试和命令历史 |
 | 文件传输 | `ssh_upload.py` / `ssh_download.py`，路径是 agent 所在电脑的本地路径 |
 | SSH 隧道 | `ssh_tunnel.py`，隧道监听在 agent 所在电脑的 127.0.0.1 |

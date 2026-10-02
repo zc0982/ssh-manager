@@ -363,3 +363,34 @@ def test_import_includes_public_key(env, tmp_path):
         f.write(f"Host a1\n    HostName 10.0.0.1\n    User u\n    IdentityFile {keyfile}\n\n")
     _, extra = h.handle({"type": "import", "servers": [], "keys": [], "payload": {"aliases": ["a1"], "upload_keys": True}})
     assert extra["import_rows"][0]["key"]["public_key"].split()[:2] == want.split()
+
+
+@pytest.mark.skipif(not shutil.which("ssh-keygen"), reason="需要 ssh-keygen")
+def test_trust_host_keys_writes_known_hosts(env, tmp_path):
+    from ssh_agent.handlers import host_key_fingerprint
+    h, keys, cfg = env
+    kh = h.skill.home / ".ssh" / "known_hosts"
+    # 已有：其他主机一条 + 同一主机的旧密钥（哈希形式）
+    _, old_pub = _keygen(tmp_path, "old", "-t", "ed25519")
+    kh.write_text(f"github.com {old_pub}\n[10.0.0.9]:4422 {old_pub}\n")
+    subprocess.run(["ssh-keygen", "-H", "-f", str(kh)], capture_output=True, check=True)  # 全部哈希化
+    _, new_pub = _keygen(tmp_path, "new", "-t", "ed25519")
+    line = f"[10.0.0.9]:4422 {new_pub}"
+
+    s = server(hostname="10.0.0.9", port=4422, host_keys=[line])
+    assert h.handle({"type": "sync", "server": s, "payload": {}})[0]["success"]
+    text = kh.read_text()
+    assert line in text
+    found = subprocess.run(["ssh-keygen", "-F", "[10.0.0.9]:4422", "-f", str(kh)], capture_output=True, text=True).stdout
+    assert old_pub.split()[1] not in found  # 旧密钥被移除（哈希条目也能删）
+    assert subprocess.run(["ssh-keygen", "-F", "github.com", "-f", str(kh)], capture_output=True).returncode == 0  # 其他主机保留
+    assert oct(kh.stat().st_mode & 0o777) == "0o600"
+
+    before = kh.read_text()
+    assert h.handle({"type": "sync", "server": {**s, "updated_at": "x"}, "payload": {}})[0]["success"]
+    assert kh.read_text() == before  # 幂等
+
+    bad = server(alias="bad", hostname="10.0.0.9", port=22, host_keys=[line])  # 端口不符
+    r, _ = h.handle({"type": "sync", "server": bad, "payload": {}})
+    assert r["success"] is False and "不符" in r["error"]
+    assert host_key_fingerprint(line)["type"] == "ssh-ed25519"
