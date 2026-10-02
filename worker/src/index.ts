@@ -139,12 +139,27 @@ async function userApi(req: Request, sql: Sql, me: string, path: string[]): Prom
 	if (a === "status" && m === "GET") {
 		const agents = await sql`select id, name, hostname, version, last_seen from agents order by last_seen desc`;
 		const [key] = await sql`select value from settings where key = 'agent_public_key'`;
-		const [backup] = await sql`select 1 from settings where key = 'agent_key_backup'`;
+		const [backup] = await sql`select value->>'has_env' as has_env from settings where key = 'agent_key_backup'`;
 		const now = Date.now();
 		return json({
 			agents: agents.map((x: any) => ({ ...x, online: now - new Date(x.last_seen).getTime() < AGENT_ONLINE_MS })),
 			public_key: key?.value ?? null,
 			key_backup: !!backup,
+			key_backup_has_env: backup?.has_env === "true",
+		});
+	}
+
+	if (a === "setup-bundle" && m === "GET") {
+		// 新电脑设置文件：服务地址 + 用主密码加密的备份（只能在本机用主密码解开）
+		const [row] = await sql`select value from settings where key = 'agent_key_backup'`;
+		if (!row) throw new HttpError(404, "还没有备份，请先在已运行 agent 的电脑上执行 ./setup.sh backup");
+		const origin = new URL(req.url).origin;
+		return new Response(JSON.stringify({ kind: "ssh-manager-setup", url: origin, created_at: new Date().toISOString(), backup: row.value }, null, 2), {
+			headers: {
+				"content-type": "application/json; charset=utf-8",
+				"content-disposition": 'attachment; filename="ssh-manager-setup.json"',
+				"cache-control": "no-store",
+			},
 		});
 	}
 
@@ -271,6 +286,12 @@ async function agentApi(req: Request, sql: Sql, path: string[]): Promise<Respons
 		}
 		const [key] = await sql`select value from settings where key = 'agent_public_key'`;
 		return json({ agent_id: agent.id, public_key: key?.value ?? null });
+	}
+
+	if (a === "servers" && req.method === "GET") {
+		const servers = await sql`select * from servers order by alias`;
+		await attachKeys(sql, servers);
+		return json(servers);
 	}
 
 	if (a === "key-backup") {

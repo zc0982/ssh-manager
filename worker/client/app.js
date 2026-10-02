@@ -72,6 +72,36 @@ async function sealData(bytes) {
   return `v1.${b64(wrapped)}.${b64(iv)}.${b64(ct)}`;
 }
 
+// ---------- 新电脑向导 ----------
+
+function renderBanner() {
+  const s = state.status, el = $("#banner");
+  let html = "", warn = false;
+  if (!s.agents.some((a) => a.online)) {
+    html = s.agents.length
+      ? `没有在线的本机 agent，连接服务器的操作会排队等待。换了电脑？<button class="ghost" data-open-newpc>新电脑设置向导</button>`
+      : `还没有本机 agent。<button class="ghost" data-open-newpc>查看设置步骤</button>`;
+  } else if (s.public_key && !s.key_backup_has_env) {
+    warn = true;
+    html = `${s.key_backup ? "云端备份是旧格式，不含连接凭证" : "agent 私钥还没有备份"}，换电脑时将无法自动恢复。请在本机运行 <code>./setup.sh backup</code>。`;
+  }
+  el.hidden = !html;
+  el.className = `banner ${warn ? "warn" : ""}`;
+  el.innerHTML = html;
+  document.documentElement.style.setProperty("--banner-h", html ? `${el.offsetHeight}px` : "0px");
+}
+
+function openNewPc() {
+  const s = state.status;
+  $("#newpc-warn").innerHTML = !s.key_backup
+    ? `<div class="warnbox">云端还没有备份。请先在已经在用的电脑上运行 <code>./setup.sh backup</code>，设置主密码后再回来下载。</div>`
+    : !s.key_backup_has_env
+      ? `<div class="warnbox">当前备份是旧格式（不含 agent 连接凭证）。请先在旧电脑上运行 <code>./setup.sh backup</code> 更新备份。</div>`
+      : "";
+  $("#btn-download-setup").disabled = !s.key_backup_has_env;
+  $("#newpc-dialog").showModal();
+}
+
 // ---------- 状态与列表 ----------
 
 const agentOnline = () => (state.status?.agents || []).some((a) => a.online);
@@ -87,6 +117,7 @@ async function loadStatus() {
     ? pill(s.key_backup, s.key_backup ? "agent 私钥已备份" : "agent 私钥未备份", s.key_backup ? "已用主密码加密备份到云端" : "在本机运行 uv run python -m ssh_agent backup-key")
     : "";
   $("#status").innerHTML = agents + backup + `<span class="pill" title="Cloudflare Access 登录身份">${esc(me.email)}</span>`;
+  renderBanner();
 }
 
 async function loadKeys() {
@@ -399,6 +430,13 @@ $("#server-form").addEventListener("submit", async (e) => {
 
 $("#server-form").auth_type.addEventListener("change", syncAuthFields);
 $("#server-form").key_id.addEventListener("change", syncAuthFields);
+
+$("#btn-newpc").addEventListener("click", openNewPc);
+$("#banner").addEventListener("click", (e) => { if (e.target.closest("[data-open-newpc]")) openNewPc(); });
+$("#btn-download-setup").addEventListener("click", () => { location.href = "/api/setup-bundle"; });
+$("#btn-copy-cmd").addEventListener("click", async () => {
+  try { await navigator.clipboard.writeText($("#newpc-cmd").textContent); toast("已复制"); } catch { toast("复制失败，请手动选择复制"); }
+});
 
 $("#btn-keys").addEventListener("click", (e) => busy(e.target, async () => {
   await loadKeys();

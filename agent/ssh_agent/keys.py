@@ -1,5 +1,6 @@
 """agent 密钥对：网页用公钥（RSA-OAEP / SHA-256）加密服务器密码，只有本机私钥能解密。"""
 import base64
+import json
 import os
 from pathlib import Path
 
@@ -9,6 +10,8 @@ from cryptography.hazmat.primitives.asymmetric import padding, rsa
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.scrypt import Scrypt
 
+AAD_V1 = b"ssh-manager-agent-key"
+AAD_V2 = b"ssh-manager-bundle-v2"
 OAEP = padding.OAEP(mgf=padding.MGF1(algorithm=hashes.SHA256()), algorithm=hashes.SHA256(), label=None)
 
 
@@ -77,25 +80,36 @@ class KeyPair:
         return self._key.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8,
                                        serialization.NoEncryption())
 
-    def export_backup(self, passphrase: str) -> dict:
+    def export_backup(self, passphrase: str, env: dict | None = None) -> dict:
+        """v2 备份：agent 私钥 + agent 连接配置（含 Access service token），一起用主密码加密。"""
         salt, nonce = os.urandom(16), os.urandom(12)
         params = {"n": 2 ** 17, "r": 8, "p": 1}
         key = Scrypt(salt=salt, length=32, **params).derive(passphrase.encode())
-        ct = AESGCM(key).encrypt(nonce, self.private_pem(), b"ssh-manager-agent-key")
+        plain = json.dumps({"private_pem": self.private_pem().decode(), "env": env or {}}).encode()
+        ct = AESGCM(key).encrypt(nonce, plain, AAD_V2)
         b64 = lambda b: base64.b64encode(b).decode()
-        return {"v": 1, "kdf": "scrypt", **params, "salt": b64(salt), "nonce": b64(nonce), "ciphertext": b64(ct),
-                "public_n": self.public_jwk["n"]}
+        return {"v": 2, "kdf": "scrypt", **params, "salt": b64(salt), "nonce": b64(nonce), "ciphertext": b64(ct),
+                "public_n": self.public_jwk["n"], "has_env": bool(env)}
 
     @staticmethod
-    def restore_backup(backup: dict, passphrase: str, path: Path) -> "KeyPair":
-        if backup.get("v") != 1 or backup.get("kdf") != "scrypt":
+    def open_backup(backup: dict, passphrase: str) -> dict:
+        """解密备份，返回 {"private_pem": bytes, "env": dict}。兼容只含私钥的 v1 备份。"""
+        if backup.get("v") not in (1, 2) or backup.get("kdf") != "scrypt":
             raise RuntimeError("不支持的备份格式")
         d = lambda k: base64.b64decode(backup[k])
         key = Scrypt(salt=d("salt"), length=32, n=backup["n"], r=backup["r"], p=backup["p"]).derive(passphrase.encode())
         try:
-            pem = AESGCM(key).decrypt(d("nonce"), d("ciphertext"), b"ssh-manager-agent-key")
+            plain = AESGCM(key).decrypt(d("nonce"), d("ciphertext"), AAD_V1 if backup["v"] == 1 else AAD_V2)
         except InvalidTag as e:
             raise RuntimeError("主密码错误") from e
+        if backup["v"] == 1:
+            return {"private_pem": plain, "env": {}}
+        data = json.loads(plain)
+        return {"private_pem": data["private_pem"].encode(), "env": data.get("env") or {}}
+
+    @staticmethod
+    def install(pem: bytes, path: Path) -> "KeyPair":
+        """写入私钥文件（600，不覆盖已有文件）。"""
         if path.exists():
             raise RuntimeError(f"{path} 已存在，为避免覆盖请先移走")
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -103,3 +117,7 @@ class KeyPair:
         with os.fdopen(fd, "wb") as f:
             f.write(pem)
         return KeyPair.load_or_create(path)
+
+    @staticmethod
+    def restore_backup(backup: dict, passphrase: str, path: Path) -> "KeyPair":
+        return KeyPair.install(KeyPair.open_backup(backup, passphrase)["private_pem"], path)

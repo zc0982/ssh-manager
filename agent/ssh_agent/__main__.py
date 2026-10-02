@@ -5,6 +5,7 @@
     uv run python -m ssh_agent pubkey            # 打印公钥（JWK）
     uv run python -m ssh_agent backup-key        # 用主密码加密 agent 私钥并备份到云端
     uv run python -m ssh_agent restore-key       # 在新电脑上用主密码从云端恢复 agent 私钥
+    uv run python -m ssh_agent setup [文件]       # 新电脑设置向导（推荐用仓库根目录的 ./setup.sh）
 """
 import argparse
 import getpass
@@ -165,8 +166,9 @@ def backup_key() -> None:
         sys.exit(f"本机没有 agent 私钥：{key_path()}")
     keys = KeyPair.load_or_create(key_path())
     client = make_client()
-    print("将用主密码加密 agent 私钥后上传到云端。主密码不会上传，忘记后无法恢复。")
-    backup = keys.export_backup(_ask_passphrase(confirm=True))
+    print("将用主密码加密 agent 私钥和连接凭证后上传到云端。主密码不会上传，忘记后无法恢复。")
+    env = {k: setting(k) for k in ("SSH_MANAGER_URL", "CF_ACCESS_CLIENT_ID", "CF_ACCESS_CLIENT_SECRET")}
+    backup = keys.export_backup(_ask_passphrase(confirm=True), env)
     check(client.put("/api/agent/key-backup", json={"backup": backup}))
     print("已备份到云端。")
 
@@ -184,7 +186,8 @@ def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     logging.getLogger("httpx").setLevel(logging.WARNING)
     p = argparse.ArgumentParser(prog="ssh_agent")
-    p.add_argument("command", choices=["run", "install-launchd", "pubkey", "backup-key", "restore-key"])
+    p.add_argument("command", choices=["run", "install-launchd", "pubkey", "backup-key", "restore-key", "setup"])
+    p.add_argument("file", nargs="?", help="setup：网页下载的 ssh-manager-setup.json")
     args = p.parse_args()
     if args.command == "run":
         run()
@@ -194,6 +197,13 @@ def main() -> None:
         backup_key()
     elif args.command == "restore-key":
         restore_key()
+    elif args.command == "setup":
+        from .setup import run_setup
+        try:
+            run_setup(args.file, key_path(), Path(os.path.expanduser(setting("SSH_SKILL_DIR", "~/.claude/skills/ssh-skill"))),
+                      agent_name(), install_launchd)
+        except KeyboardInterrupt:
+            sys.exit("\n已取消")
     else:
         print(json.dumps(KeyPair.load_or_create(key_path()).public_jwk, indent=2))
 

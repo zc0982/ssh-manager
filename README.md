@@ -64,8 +64,24 @@ SSH 连接管理系统：服务器清单存在云端，网页托管在 Cloudflar
 
    安装为开机自启（macOS）：`uv run python -m ssh_agent install-launchd`
 
-6. **备份 agent 私钥**（强烈建议）：`uv run python -m ssh_agent backup-key`，按提示设置主密码。
-   换电脑时：配置好 `agent/.env` 后先运行 `uv run python -m ssh_agent restore-key`，再启动 agent。
+6. **备份**（强烈建议）：`./setup.sh backup`，设置主密码。agent 私钥和 agent 的连接凭证会用主密码加密后存到云端。
+
+## 换电脑
+
+1. 新电脑上准备好 uv、git 和 ssh-skill（`~/.claude/skills/ssh-skill`）。
+2. 浏览器打开网页，登录后点「新电脑」→ 下载 `ssh-manager-setup.json`（内容仍是主密码加密的）。
+3. 运行向导，按提示输入主密码：
+
+   ```bash
+   git clone https://github.com/zc0982/ssh-manager.git
+   cd ssh-manager && ./setup.sh
+   ```
+
+   向导会：检查环境 → 解密设置文件 → 写入 agent 私钥和 `agent/.env`（600 权限）→ 连接云端并把所有服务器（含云端私钥）同步到 `~/.ssh/config` → 安装开机自启的后台服务。
+
+`setup.sh` 的其他用法：`./setup.sh backup`（更新云端备份）、`./setup.sh service`（安装/重启后台服务）、`./setup.sh status`（查看后台服务状态和日志）。
+
+没有在线的 agent，或者备份缺失、过时的时候，网页顶部会出现提醒。
 
 ## 开发
 

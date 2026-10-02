@@ -12,6 +12,7 @@
   <div class="brand">SSH Manager</div>
   <div id="status" class="status"></div>
   <div class="actions">
+    <button id="btn-newpc" class="ghost">新电脑</button>
     <button id="btn-keys" class="ghost">密钥</button>
     <button id="btn-import" class="ghost">从本机导入</button>
     <button id="btn-pull" class="ghost">全部同步到本机</button>
@@ -19,6 +20,7 @@
   </div>
 </header>
 
+<div id="banner" class="banner" hidden></div>
 <main class="layout">
   <aside class="sidebar">
     <input id="search" type="search" placeholder="搜索别名 / 主机 / 标签 / 备注">
@@ -98,6 +100,30 @@
     <div class="dialog-actions">
       <button type="button" class="ghost" data-close>关闭</button>
       <button type="button" class="primary" id="btn-key-upload">加密并上传</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="newpc-dialog">
+  <form method="dialog">
+    <h2>在新电脑上使用 SSH Manager</h2>
+    <p class="hint">SSH 连接由电脑上的 agent 通过 ssh-skill 执行。换电脑后按下面的步骤设置，服务器配置、密码和云端私钥都会自动恢复到新电脑。</p>
+    <div id="newpc-warn"></div>
+    <ol class="steps">
+      <li><b>准备环境</b>：安装 <a href="https://docs.astral.sh/uv/" target="_blank" rel="noopener">uv</a>、git，以及 ssh-skill（放在 <code>~/.claude/skills/ssh-skill</code>）。</li>
+      <li><b>下载设置文件</b>（已用你的主密码加密）：
+        <div><button type="button" class="primary" id="btn-download-setup">下载 ssh-manager-setup.json</button></div>
+      </li>
+      <li><b>获取代码并运行向导</b>，按提示输入主密码：
+        <pre class="cmd" id="newpc-cmd">git clone https://github.com/zc0982/ssh-manager.git
+cd ssh-manager && ./setup.sh</pre>
+        <button type="button" class="ghost" id="btn-copy-cmd">复制命令</button>
+      </li>
+      <li><b>完成</b>：向导会写入 agent 私钥和连接凭证、同步所有服务器到 <code>~/.ssh/config</code>，并安装开机自启的后台服务。回到这个页面，顶部会显示新电脑的 agent 在线。</li>
+    </ol>
+    <p class="hint">旧电脑不再使用时，可以在终端运行 <code>launchctl bootout gui/$(id -u)/com.ssh-manager.agent</code> 停掉它的 agent。</p>
+    <div class="dialog-actions">
+      <button type="button" class="ghost" data-close>关闭</button>
     </div>
   </form>
 </dialog>

@@ -199,3 +199,77 @@ def test_import_uploads_and_dedupes_keys(env):
     # 不勾选上传时保留本机路径
     _, extra = h.handle({"type": "import", "servers": [], "keys": [], "payload": {"aliases": ["a1"]}})
     assert extra["import_rows"][0]["key"] is None and extra["import_rows"][0]["identity_file"]
+
+
+def test_v1_backup_still_restorable(tmp_path):
+    """升级前的 v1 备份（只含私钥）仍可恢复。"""
+    import base64, os as _os
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+    from cryptography.hazmat.primitives.kdf.scrypt import Scrypt
+    k = KeyPair.load_or_create(tmp_path / "k.pem")
+    salt, nonce = _os.urandom(16), _os.urandom(12)
+    key = Scrypt(salt=salt, length=32, n=2 ** 14, r=8, p=1).derive(b"old passphrase!!")
+    ct = AESGCM(key).encrypt(nonce, k.private_pem(), b"ssh-manager-agent-key")
+    b = lambda x: base64.b64encode(x).decode()
+    v1 = {"v": 1, "kdf": "scrypt", "n": 2 ** 14, "r": 8, "p": 1, "salt": b(salt), "nonce": b(nonce), "ciphertext": b(ct)}
+    opened = KeyPair.open_backup(v1, "old passphrase!!")
+    assert opened["env"] == {} and opened["private_pem"] == k.private_pem()
+
+
+def test_setup_wizard_end_to_end(tmp_path, monkeypatch):
+    import httpx
+    from ssh_agent import setup as wizard
+
+    home = tmp_path / "home"
+    (home / ".ssh").mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(home))
+    old = KeyPair.load_or_create(tmp_path / "old.pem")  # 旧电脑上的 agent 私钥
+    env = {"SSH_MANAGER_URL": "https://x.example", "CF_ACCESS_CLIENT_ID": "cid.access", "CF_ACCESS_CLIENT_SECRET": "sec"}
+    bundle = tmp_path / "ssh-manager-setup.json"
+    bundle.write_text(json.dumps({"url": "https://x.example", "backup": old.export_backup("master passphrase", env)}))
+
+    srv = server(alias="web-01", key_id="k1", key={"id": "k1", "name": "deploy", "key_encrypted": old.seal(FAKE_KEY)})
+    seen = {}
+
+    def handler(req: httpx.Request):
+        seen.setdefault("headers", req.headers)
+        if req.url.path == "/api/agent/hello":
+            return httpx.Response(200, json={"agent_id": "a1", "public_key": old.public_jwk})
+        if req.url.path == "/api/agent/servers":
+            return httpx.Response(200, json=[srv])
+        return httpx.Response(404)
+
+    real_client = httpx.Client
+    monkeypatch.setattr(wizard.httpx, "Client", lambda **kw: real_client(transport=httpx.MockTransport(handler), **kw))
+    monkeypatch.setattr(wizard, "ENV_FILE", tmp_path / "agent.env")
+    answers = iter(["wrong passphrase", "master passphrase"])
+    monkeypatch.setattr(wizard.getpass, "getpass", lambda prompt="": next(answers))
+    monkeypatch.setattr("builtins.input", lambda prompt="": "y")
+    installed = []
+    skill_home_bridge = SkillBridge(SKILL_DIR, home=home)
+    monkeypatch.setattr(wizard, "SkillBridge", lambda d: skill_home_bridge)
+
+    key_path = home / ".config" / "ssh-manager" / "agent_key.pem"
+    wizard.run_setup(str(bundle), key_path, SKILL_DIR, "new-mac", lambda: installed.append(True))
+
+    assert KeyPair.load_or_create(key_path).matches(old.public_jwk)
+    assert oct(key_path.stat().st_mode & 0o777) == "0o600"
+    env_file = tmp_path / "agent.env"
+    assert "CF_ACCESS_CLIENT_SECRET=sec" in env_file.read_text() and oct(env_file.stat().st_mode & 0o777) == "0o600"
+    assert seen["headers"]["cf-access-client-id"] == "cid.access"
+    cfg = (home / ".ssh" / "config").read_text()
+    assert "Host web-01" in cfg and "deploy.key" in cfg
+    assert (home / ".ssh" / "ssh-manager" / "deploy.key").read_bytes() == FAKE_KEY
+    assert installed == [True]
+
+
+def test_setup_rejects_v1_bundle(tmp_path, monkeypatch):
+    from ssh_agent import setup as wizard
+    k = KeyPair.load_or_create(tmp_path / "k.pem")
+    backup = k.export_backup("master passphrase")  # 不含 env
+    bundle = tmp_path / "b.json"
+    bundle.write_text(json.dumps({"url": "https://x", "backup": backup}))
+    monkeypatch.setattr(wizard, "SkillBridge", lambda d: SkillBridge(SKILL_DIR, home=tmp_path))
+    with pytest.raises(SystemExit):
+        wizard.run_setup(str(bundle), tmp_path / "new.pem", SKILL_DIR, "x", lambda: None)
+    assert not (tmp_path / "new.pem").exists()
