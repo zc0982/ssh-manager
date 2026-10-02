@@ -110,3 +110,9 @@ def test_exec_unreachable_and_unknown_type(env):
     assert r["success"] is False
     assert h.handle({"type": "rm_rf", "payload": {}})[0]["success"] is False
     assert h.handle({"type": "exec", "server": None, "payload": {"command": "x"}})[0]["error"] == "服务器已被删除"
+
+
+def test_postgres_array_literal_tags(env):
+    h, _, cfg = env
+    assert h.handle({"type": "sync", "server": server(tags="{e2e,web}"), "payload": {}})[0]["success"]
+    assert "# tags: e2e,web" in cfg.read_text()

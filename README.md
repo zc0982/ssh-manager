@@ -3,7 +3,7 @@
 SSH 连接管理系统：服务器清单存在云端，网页托管在 Cloudflare，实际的 SSH 连接由你电脑上的 agent 通过本机 ssh-skill 执行。
 
 ```
-浏览器 ──(Cloudflare Access 登录)──▶ Worker（网页 + API）──Hyperdrive──▶ PlanetScale Postgres
+浏览器 ──(Cloudflare Access 登录)──▶ Worker（网页 + API）──Hyperdrive──▶ Supabase Postgres
                                           ▲
                                           │ 长轮询领取任务 / 回传结果（Access service token）
                                           │
@@ -11,7 +11,7 @@ SSH 连接管理系统：服务器清单存在云端，网页托管在 Cloudflar
                                           └──▶ ~/.ssh/config（同步服务器配置）
 ```
 
-- **worker/**：Cloudflare Worker，同时提供静态网页（Workers Static Assets）和 `/api/*`，通过 Hyperdrive 连接 PlanetScale Postgres。
+- **worker/**：Cloudflare Worker，同时提供静态网页（Workers Static Assets）和 `/api/*`，通过 Hyperdrive 连接 Supabase Postgres。
 - **agent/**：运行在本机的 Python 程序。从 Worker 领取任务（测试连接、执行命令、传输文件、隧道、同步配置……），调用 `~/.claude/skills/ssh-skill/scripts/*.py` 执行，不直接调用 ssh/scp。
 - **db/migrations/**：数据库表结构。
 
@@ -39,10 +39,10 @@ SSH 连接管理系统：服务器清单存在云端，网页托管在 Cloudflar
 
 ## 部署
 
-需要：Cloudflare 账号（已开通 Zero Trust）、[`cf` CLI](https://www.npmjs.com/package/cf)、Node.js 22+、[uv](https://docs.astral.sh/uv/)、已安装的 ssh-skill。
+需要：Supabase 账号、Cloudflare 账号（已开通 Zero Trust）、[`cf` CLI](https://www.npmjs.com/package/cf)、Node.js 22+、[uv](https://docs.astral.sh/uv/)、已安装的 ssh-skill。
 
-1. **数据库**：创建 PlanetScale Postgres（可在 Cloudflare 控制台 Storage & databases → Postgres & MySQL 创建，费用计入 Cloudflare 账单），执行 `db/migrations/001_init.sql`。
-2. **Hyperdrive**：用数据库连接串创建 Hyperdrive 配置并**关闭缓存**（任务队列需要实时读取），把 ID 填到 `worker/cloudflare.config.ts`。
+1. **数据库**：创建 Supabase 项目（免费额度即可），执行 `db/migrations/001_init.sql`。迁移会给所有表开启 RLS 并收回 `anon`/`authenticated` 的权限，因此 Supabase 的 Data API 读不到这些表。
+2. **Hyperdrive**：用 Supabase 的 **Session pooler** 连接串（`aws-0-<region>.pooler.supabase.com:5432`，用户名 `postgres.<project-ref>`；直连地址只有 IPv6，Hyperdrive 连不上）创建 Hyperdrive 配置并**关闭缓存**（任务队列需要实时读取），把 ID 填到 `worker/cloudflare.config.ts`。
 3. **部署 Worker**：
 
    ```bash

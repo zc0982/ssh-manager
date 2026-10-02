@@ -42,8 +42,9 @@ export async function authenticate(request: Request, env: AuthEnv): Promise<Iden
 		if (payload.common_name && payload.common_name === env.AGENT_CLIENT_ID) {
 			return { kind: "agent", clientId: String(payload.common_name) };
 		}
-	} catch {
+	} catch (e) {
 		// 签名/过期/aud 不符
+		console.warn("Access JWT 校验失败：", (e as Error).message);
 	}
 	return null;
 }

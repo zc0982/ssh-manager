@@ -101,7 +101,10 @@ class SkillBridge:
             fields.append(f"--key={key}")
         if jump:
             fields.append(f"--jump={jump}")
-        tags = [t for t in server.get("tags") or [] if t]
+        tags = server.get("tags") or []
+        if isinstance(tags, str):  # Postgres 数组字面量，如 "{web,nginx}"
+            tags = tags.strip("{}").split(",")
+        tags = [t.strip().strip('"') for t in tags if t.strip().strip('"')]
         if tags:
             fields += ["--tags", *tags]
 

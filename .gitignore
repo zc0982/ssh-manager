@@ -10,3 +10,5 @@ node_modules/
 .playwright-mcp/
 *.pem
 .DS_Store
+.secrets.env
+supabase/.temp/

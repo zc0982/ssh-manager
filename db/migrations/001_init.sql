@@ -69,3 +69,17 @@ end $$;
 drop trigger if exists servers_touch on servers;
 create trigger servers_touch before update on servers
 for each row execute function touch_updated_at();
+
+-- Supabase 会通过 Data API（PostgREST）暴露 public schema 的表。
+-- 开启 RLS 且不建策略，并收回 anon/authenticated 的权限，使这些表只能由 Worker（经 Hyperdrive，以表所有者身份）访问。
+alter table servers enable row level security;
+alter table agents enable row level security;
+alter table settings enable row level security;
+alter table jobs enable row level security;
+do $$
+begin
+    if exists (select 1 from pg_roles where rolname = 'anon') then
+        revoke all on servers, agents, settings, jobs from anon, authenticated;
+        revoke all on sequence jobs_id_seq from anon, authenticated;
+    end if;
+end $$;

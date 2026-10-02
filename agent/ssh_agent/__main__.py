@@ -145,6 +145,7 @@ def install_launchd() -> None:
 
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    logging.getLogger("httpx").setLevel(logging.WARNING)
     p = argparse.ArgumentParser(prog="ssh_agent")
     p.add_argument("command", choices=["run", "install-launchd", "pubkey"])
     args = p.parse_args()

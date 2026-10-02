@@ -304,7 +304,7 @@ export default {
 			return json({ detail: "missing X-SSH-Manager header" }, 403);
 		}
 
-		const sql = postgres(env.HYPERDRIVE.connectionString, { max: 5, fetch_types: false, prepare: true });
+		const sql = postgres(env.HYPERDRIVE.connectionString, { max: 5, prepare: true });
 		try {
 			const parts = url.pathname.slice("/api/".length).split("/").filter(Boolean);
 			if (parts[0] === "agent") {

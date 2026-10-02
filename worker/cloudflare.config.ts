@@ -11,7 +11,7 @@ export default defineConfig({
 		env: {
 			ASSETS: bindings.assets(),
 			HYPERDRIVE: bindings.hyperdrive({
-				id: "HYPERDRIVE_ID",
+				id: "1239268d09dc491b8b77bd2b989ba7e8",
 				dev: { connectionString: (globalThis as any).process?.env?.DEV_DATABASE_URL },
 			}),
 			// Cloudflare Access 配置，通过 `cf deploy --secrets-file` 上传
