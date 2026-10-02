@@ -4,8 +4,8 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 import App from "./App";
 import "./index.css";
 
-// 首帧前设置深浅色，避免闪烁（之后由 useSystemTheme 跟随系统）
-document.documentElement.classList.toggle("dark", window.matchMedia("(prefers-color-scheme: dark)").matches);
+// Cyberpunk 主题固定使用深色
+document.documentElement.classList.add("dark");
 
 createRoot(document.getElementById("root")!).render(
 	<StrictMode>

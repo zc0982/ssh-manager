@@ -6,7 +6,6 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Toaster } from "@/components/ui/sonner";
-import { useSystemTheme } from "@/hooks/use-theme";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { ImportDialog, KeysDialog, NewPcDialog } from "@/components/dialogs";
 import { EnvBadge, ServerDetail } from "@/components/server-detail";
@@ -15,7 +14,6 @@ import { api, fmtTime, runJob, type Server, type SshKey, type Status } from "@/l
 import { cn } from "@/lib/utils";
 
 export default function App() {
-	useSystemTheme();
 	const [me, setMe] = useState("");
 	const [status, setStatus] = useState<Status | null>(null);
 	const [servers, setServers] = useState<Server[]>([]);
@@ -75,10 +73,10 @@ export default function App() {
 	}
 
 	return (
-		<div className="flex h-dvh flex-col bg-background text-foreground">
+		<div className="flex h-dvh flex-col text-foreground">
 			<Toaster richColors position="bottom-center" />
-			<header className="flex flex-wrap items-center gap-3 border-b px-4 py-2.5 md:px-5">
-				<div className="flex items-center gap-2 font-semibold"><TerminalSquareIcon className="size-5 text-primary" />SSH Manager</div>
+			<header className="flex flex-wrap items-center gap-3 border-b bg-background/70 px-4 py-2.5 backdrop-blur-md md:px-5">
+				<div className="flex items-center gap-2 font-semibold tracking-wide"><TerminalSquareIcon className="size-5 text-primary" /><span className="neon-text">SSH Manager</span></div>
 				<div className="flex flex-1 flex-wrap items-center gap-1.5">
 					{status?.agents.length
 						? status.agents.map((a) => (
@@ -110,7 +108,7 @@ export default function App() {
 			</header>
 
 			{status && (!online || (status.public_key && !status.key_backup_has_env)) && (
-				<Alert className="rounded-none border-x-0 border-t-0 py-2">
+				<Alert className="rounded-none border-x-0 border-t-0 bg-background/70 py-2 backdrop-blur-md">
 					<TriangleAlertIcon />
 					<AlertDescription className="flex flex-wrap items-center gap-2">
 						{!online ? (
@@ -129,7 +127,7 @@ export default function App() {
 			)}
 
 			<div className="grid min-h-0 flex-1 grid-rows-[auto_1fr] md:grid-cols-[280px_1fr] md:grid-rows-1">
-				<aside className="flex max-h-[40vh] min-h-0 flex-col gap-2 border-b p-3 md:max-h-none md:border-r md:border-b-0">
+				<aside className="flex max-h-[40vh] min-h-0 flex-col gap-2 border-b bg-background/60 p-3 backdrop-blur-md md:max-h-none md:border-r md:border-b-0">
 					<div className="relative">
 						<SearchIcon className="pointer-events-none absolute top-1/2 left-2.5 size-4 -translate-y-1/2 text-muted-foreground" />
 						<Input className="pl-8" placeholder="搜索别名 / 主机 / 标签 / 备注" value={query} onChange={(e) => setQuery(e.target.value)} />

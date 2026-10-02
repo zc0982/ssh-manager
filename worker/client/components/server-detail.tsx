@@ -80,7 +80,7 @@ export function ServerDetail({ server, keys, onEdit, onChanged, onDeleted }: {
 			<div className="flex flex-wrap items-start justify-between gap-3">
 				<div className="min-w-0">
 					<div className="flex flex-wrap items-center gap-2">
-						<h1 className="text-xl font-semibold">{server.alias}</h1>
+						<h1 className="text-xl font-semibold tracking-wide">{server.alias}</h1>
 						<EnvBadge env={server.environment} />
 						{notSynced && <Badge variant="outline" className="border-amber-500 text-amber-600">待同步到本机</Badge>}
 					</div>
@@ -108,7 +108,7 @@ export function ServerDetail({ server, keys, onEdit, onChanged, onDeleted }: {
 				</div>
 			</div>
 
-			<Card size="sm">
+			<Card size="sm" className="bg-card/80 backdrop-blur-md">
 				<CardContent className="grid grid-cols-2 gap-x-6 gap-y-3 text-sm md:grid-cols-3">
 					<Fact label="认证">
 						{server.auth_type === "key"
@@ -202,10 +202,10 @@ function ExecTab({ server, lines, append, resultLines, onDone }: {
 
 	return (
 		<div className="flex flex-col gap-2 pt-2">
-			<pre ref={termRef} className="h-[clamp(14rem,38vh,32rem)] overflow-y-auto rounded-lg bg-zinc-950 p-3 font-mono text-[13px] leading-relaxed whitespace-pre-wrap break-all text-zinc-200">
+			<pre ref={termRef} className="neon-panel h-[clamp(14rem,38vh,32rem)] overflow-y-auto rounded-lg bg-black/80 p-3 font-mono text-[13px] leading-relaxed whitespace-pre-wrap break-all text-zinc-200 backdrop-blur-sm">
 				{lines.length === 0 && <span className="text-zinc-500">命令会交给本机 agent，通过 ssh-skill 在 {server.alias} 上执行。↑/↓ 浏览历史。</span>}
 				{lines.map((l, i) => (
-					<div key={i} className={cn(l.kind === "cmd" && "text-sky-400", l.kind === "err" && "text-red-400", l.kind === "info" && "text-zinc-500")}>{l.text}</div>
+					<div key={i} className={cn(l.kind === "cmd" && "text-primary", l.kind === "err" && "text-red-400", l.kind === "info" && "text-zinc-500")}>{l.text}</div>
 				))}
 				{running && <div className="animate-pulse text-zinc-500">执行中…</div>}
 			</pre>

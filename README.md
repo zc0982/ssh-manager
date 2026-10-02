@@ -11,7 +11,8 @@ SSH 连接管理系统：服务器清单存在云端，网页托管在 Cloudflar
                                           └──▶ ~/.ssh/config（同步服务器配置）
 ```
 
-- **worker/**：Cloudflare Worker，同时提供静态网页（Workers Static Assets）和 `/api/*`，通过 Hyperdrive 连接 Supabase Postgres。前端是 React + Tailwind + [shadcn/ui](https://ui.shadcn.com)（`worker/client/`，组件在 `client/components/ui/`，用 `npx shadcn@latest add <组件>` 添加）。
+- **worker/**：Cloudflare Worker，同时提供静态网页（Workers Static Assets）和 `/api/*`，通过 Hyperdrive 连接 Supabase Postgres。前端是 React + Tailwind + [shadcn/ui](https://ui.shadcn.com)（`worker/client/`，组件在 `client/components/ui/`，用 `npx shadcn@latest add <组件>` 添加），配色为 shadcn.io 的 Cyberpunk 主题，固定深色。
+  - **背景图**：把你自己的图片放到 `worker/public/background.jpg` 后重新部署即可（该文件已 gitignore，不会提交到仓库；只部署到受 Access 保护的站点）。没有图片时显示霓虹网格背景。
 - **agent/**：运行在本机的 Python 程序。从 Worker 领取任务（测试连接、执行命令、传输文件、隧道、同步配置……），调用 `~/.claude/skills/ssh-skill/scripts/*.py` 执行，不直接调用 ssh/scp。
 - **db/migrations/**：数据库表结构。
 
