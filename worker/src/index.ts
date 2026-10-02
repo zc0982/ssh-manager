@@ -12,6 +12,9 @@ const ALIAS_RE = /^[A-Za-z0-9._-]+$/;
 const TOKEN_RE = /^\S+$/;
 const LINE_RE = /^[^\r\n]*$/;
 const TAG_RE = /^[^\s,-][^\s,]*$/;
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const SEALED_RE = /^v1\.[A-Za-z0-9+/=]+\.[A-Za-z0-9+/=]+\.[A-Za-z0-9+/=]+$/;
+const MAX_SEALED = 120_000;
 const MAX_RESULT_TEXT = 100_000;
 const AGENT_ONLINE_MS = 60_000;
 const POLL_WAIT_MS = 20_000;
@@ -55,19 +58,42 @@ function parseServer(b: any) {
 	if (auth_type !== "key" && auth_type !== "password") throw new HttpError(422, "auth_type 只能是 key 或 password");
 	const tags = Array.isArray(b.tags) ? b.tags.map((t: unknown) => String(t).trim()).filter(Boolean) : [];
 	for (const t of tags) if (!TAG_RE.test(t)) throw new HttpError(422, `非法标签：${t}`);
+	const key_id = auth_type === "key" ? str(b.key_id, "云端密钥", { re: UUID_RE, max: 36 }) : null;
 	return {
 		alias: str(b.alias, "别名", { required: true, re: ALIAS_RE, max: 64 })!,
 		hostname: str(b.hostname, "主机", { required: true, re: TOKEN_RE })!,
 		port,
 		username: str(b.username, "用户名", { required: true, re: TOKEN_RE, max: 64 })!,
 		auth_type,
-		identity_file: auth_type === "key" ? str(b.identity_file, "密钥文件", { max: 1024 }) : null,
+		identity_file: auth_type === "key" && !key_id ? str(b.identity_file, "密钥文件", { max: 1024 }) : null,
+		key_id,
 		proxy_jump: str(b.proxy_jump, "跳板机", { re: ALIAS_RE, max: 64 }),
 		environment: str(b.environment, "环境", { re: TOKEN_RE, max: 32 }) ?? "development",
 		tags,
 		location: str(b.location, "位置") ?? "",
 		description: str(b.description, "备注", { max: 1000 }) ?? "",
 	};
+}
+
+async function assertKey(sql: Sql, keyId: string | null) {
+	if (!keyId) return;
+	const [k] = await sql`select 1 from ssh_keys where id = ${keyId}`;
+	if (!k) throw new HttpError(422, "选择的云端密钥不存在");
+}
+
+function parseKey(b: any) {
+	const name = str(b?.name, "密钥名称", { required: true, re: ALIAS_RE, max: 64 })!;
+	const key_encrypted = str(b?.key_encrypted, "密钥密文", { required: true, re: SEALED_RE, max: MAX_SEALED })!;
+	return { name, key_encrypted, comment: str(b?.comment, "说明", { max: 500 }) ?? "" };
+}
+
+/** 给服务器行附上它引用的密钥（含密文），供 agent 解密写入本机 */
+async function attachKeys(sql: Sql, servers: any[]) {
+	const ids = [...new Set(servers.map((s) => s.key_id).filter(Boolean))];
+	if (!ids.length) return;
+	const keys = await sql`select id, name, key_encrypted from ssh_keys where id = any(${ids})`;
+	const byId = new Map(keys.map((k: any) => [k.id, k]));
+	for (const s of servers) if (s.key_id) s.key = byId.get(s.key_id) ?? null;
 }
 
 function publicServer(s: any) {
@@ -113,11 +139,35 @@ async function userApi(req: Request, sql: Sql, me: string, path: string[]): Prom
 	if (a === "status" && m === "GET") {
 		const agents = await sql`select id, name, hostname, version, last_seen from agents order by last_seen desc`;
 		const [key] = await sql`select value from settings where key = 'agent_public_key'`;
+		const [backup] = await sql`select 1 from settings where key = 'agent_key_backup'`;
 		const now = Date.now();
 		return json({
 			agents: agents.map((x: any) => ({ ...x, online: now - new Date(x.last_seen).getTime() < AGENT_ONLINE_MS })),
 			public_key: key?.value ?? null,
+			key_backup: !!backup,
 		});
+	}
+
+	if (a === "keys") {
+		if (!b && m === "GET") {
+			return json(await sql`
+				select k.id, k.name, k.comment, k.created_by, k.created_at,
+					(select count(*)::int from servers s where s.key_id = k.id) as used_by
+				from ssh_keys k order by k.name`);
+		}
+		if (!b && m === "POST") {
+			const k = parseKey(await body(req));
+			const dup = await sql`select 1 from ssh_keys where name = ${k.name}`;
+			if (dup.length) throw new HttpError(409, `密钥名 ${k.name} 已存在`);
+			const [row] = await sql`insert into ssh_keys ${sql({ ...k, created_by: me } as any)} returning id, name, comment, created_by, created_at`;
+			return json({ ...row, used_by: 0 }, 201);
+		}
+		if (b && m === "DELETE") {
+			const users = await sql`select alias from servers where key_id = ${b}`;
+			if (users.length) throw new HttpError(409, `仍有服务器在使用该密钥：${users.map((u: any) => u.alias).join(", ")}`);
+			await sql`delete from ssh_keys where id = ${b}`;
+			return json({ deleted: true });
+		}
 	}
 
 	if (a === "servers") {
@@ -128,6 +178,7 @@ async function userApi(req: Request, sql: Sql, me: string, path: string[]): Prom
 			const s = parseServer(input);
 			const enc = s.auth_type === "password" ? str(input.password_encrypted, "密码密文", { max: 2048 }) : null;
 			if (s.auth_type === "password" && !enc) throw new HttpError(422, "密码认证需要填写密码");
+			await assertKey(sql, s.key_id);
 			const exists = await sql`select 1 from servers where alias = ${s.alias}`;
 			if (exists.length) throw new HttpError(409, `别名 ${s.alias} 已存在`);
 			const [row] = await sql`insert into servers ${sql({ ...s, password_encrypted: enc } as any)} returning *`;
@@ -144,6 +195,7 @@ async function userApi(req: Request, sql: Sql, me: string, path: string[]): Prom
 			if (m === "PUT") {
 				const input = await body(req);
 				const s = parseServer(input);
+				await assertKey(sql, s.key_id);
 				let enc: string | null = existing.password_encrypted;
 				if (s.auth_type === "key" || input.clear_password) enc = null;
 				const newEnc = str(input.password_encrypted, "密码密文", { max: 2048 });
@@ -221,6 +273,24 @@ async function agentApi(req: Request, sql: Sql, path: string[]): Promise<Respons
 		return json({ agent_id: agent.id, public_key: key?.value ?? null });
 	}
 
+	if (a === "key-backup") {
+		if (req.method === "GET") {
+			const [row] = await sql`select value from settings where key = 'agent_key_backup'`;
+			return json({ backup: row?.value ?? null });
+		}
+		if (req.method === "PUT") {
+			const { backup } = await body(req);
+			if (!backup || typeof backup !== "object" || backup.kdf !== "scrypt" || typeof backup.ciphertext !== "string" || JSON.stringify(backup).length > 20_000) {
+				throw new HttpError(422, "备份格式不正确");
+			}
+			const [pub] = await sql`select value from settings where key = 'agent_public_key'`;
+			if (pub && pub.value.n !== backup.public_n) throw new HttpError(409, "备份的私钥与云端登记的公钥不匹配");
+			await sql`insert into settings (key, value) values ('agent_key_backup', ${sql.json(backup)})
+				on conflict (key) do update set value = excluded.value`;
+			return json({ ok: true });
+		}
+	}
+
 	if (a === "poll" && req.method === "POST") {
 		const { agent_id } = await body(req);
 		const deadline = Date.now() + POLL_WAIT_MS;
@@ -236,8 +306,11 @@ async function agentApi(req: Request, sql: Sql, path: string[]): Promise<Respons
 				// 附带执行任务所需的服务器信息（包括密码密文，由 agent 本地解密）
 				if (job.type === "sync_all" || job.type === "local_list" || job.type === "import") {
 					job.servers = await sql`select * from servers order by alias`;
+					await attachKeys(sql, job.servers);
+					if (job.type === "import") job.keys = await sql`select id, name, key_encrypted from ssh_keys`;
 				} else if (job.server_id) {
 					[job.server] = await sql`select * from servers where id = ${job.server_id}`;
+					if (job.server) await attachKeys(sql, [job.server]);
 				}
 				return json({ job });
 			}
@@ -262,6 +335,16 @@ async function agentApi(req: Request, sql: Sql, path: string[]): Promise<Respons
 			const errors: Record<string, string> = {};
 			for (const raw of input.import_rows) {
 				try {
+					if (raw?.key) {
+						// agent 已比对过：existing 表示云端已有同内容的同名密钥
+						const k = raw.key.existing
+							? { name: str(raw.key.name, "密钥名称", { required: true, re: ALIAS_RE, max: 64 })! }
+							: parseKey(raw.key);
+						let [row] = await sql`select id from ssh_keys where name = ${k.name}`;
+						if (!row && !raw.key.existing) [row] = await sql`insert into ssh_keys ${sql({ ...(k as any), created_by: job.created_by })} returning id`;
+						if (!row) throw new HttpError(422, `云端密钥 ${k.name} 不存在`);
+						raw.key_id = row.id;
+					}
 					const s = parseServer(raw);
 					const enc = s.auth_type === "password" ? str(raw.password_encrypted, "密码密文", { max: 2048 }) : null;
 					await sql`insert into servers ${sql({ ...s, password_encrypted: enc, last_synced_at: new Date() } as any)}`;

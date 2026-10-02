@@ -1,7 +1,7 @@
 const $ = (s, el = document) => el.querySelector(s);
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 
-const state = { servers: [], selected: null, env: "all", tab: "exec", history: [], term: {}, status: null };
+const state = { servers: [], keys: [], selected: null, env: "all", tab: "exec", history: [], term: {}, status: null };
 
 async function api(path, opts = {}) {
   const res = await fetch(path, {
@@ -49,12 +49,27 @@ async function busy(btn, fn) {
 // ---------- 密码加密（RSA-OAEP，agent 公钥） ----------
 
 let publicKey = null;
-async function encryptPassword(plain) {
+const b64 = (buf) => { let s = ""; for (const b of new Uint8Array(buf)) s += String.fromCharCode(b); return btoa(s); };
+
+async function agentKey() {
   const jwk = state.status?.public_key;
   if (!jwk) throw new Error("本机 agent 尚未注册公钥，请先启动 agent");
   publicKey ??= await crypto.subtle.importKey("jwk", jwk, { name: "RSA-OAEP", hash: "SHA-256" }, false, ["encrypt"]);
-  const buf = await crypto.subtle.encrypt({ name: "RSA-OAEP" }, publicKey, new TextEncoder().encode(plain));
-  return btoa(String.fromCharCode(...new Uint8Array(buf)));
+  return publicKey;
+}
+
+async function encryptPassword(plain) {
+  return b64(await crypto.subtle.encrypt({ name: "RSA-OAEP" }, await agentKey(), new TextEncoder().encode(plain)));
+}
+
+/** 大数据（SSH 私钥）：随机 AES-256-GCM 密钥加密内容，再用 agent 公钥包裹 AES 密钥 */
+async function sealData(bytes) {
+  const aes = await crypto.subtle.generateKey({ name: "AES-GCM", length: 256 }, true, ["encrypt"]);
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const ct = await crypto.subtle.encrypt({ name: "AES-GCM", iv }, aes, bytes);
+  const raw = await crypto.subtle.exportKey("raw", aes);
+  const wrapped = await crypto.subtle.encrypt({ name: "RSA-OAEP" }, await agentKey(), raw);
+  return `v1.${b64(wrapped)}.${b64(iv)}.${b64(ct)}`;
 }
 
 // ---------- 状态与列表 ----------
@@ -68,7 +83,29 @@ async function loadStatus() {
   const agents = s.agents.length
     ? s.agents.map((a) => pill(a.online, `agent: ${a.name}`, `${a.hostname} · 最后心跳 ${fmtTime(a.last_seen)}`)).join("")
     : pill(false, "没有本机 agent", "在本机运行 agent 后才能连接服务器");
-  $("#status").innerHTML = agents + `<span class="pill" title="Cloudflare Access 登录身份">${esc(me.email)}</span>`;
+  const backup = s.public_key
+    ? pill(s.key_backup, s.key_backup ? "agent 私钥已备份" : "agent 私钥未备份", s.key_backup ? "已用主密码加密备份到云端" : "在本机运行 uv run python -m ssh_agent backup-key")
+    : "";
+  $("#status").innerHTML = agents + backup + `<span class="pill" title="Cloudflare Access 登录身份">${esc(me.email)}</span>`;
+}
+
+async function loadKeys() {
+  state.keys = await api("/api/keys");
+  const sel = $("#server-form").key_id;
+  const cur = sel.value;
+  sel.innerHTML = `<option value="">使用本机密钥文件路径</option>` +
+    state.keys.map((k) => `<option value="${k.id}">云端：${esc(k.name)}${k.comment ? ` · ${esc(k.comment)}` : ""}</option>`).join("");
+  sel.value = cur;
+  renderKeys();
+}
+
+function renderKeys() {
+  $("#keys-list").innerHTML = state.keys.length
+    ? `<table><tr><th>名称</th><th>说明</th><th>使用中</th><th>上传</th><th></th></tr>${state.keys.map((k) => `
+        <tr><td class="mono">${esc(k.name)}</td><td>${esc(k.comment)}</td><td>${k.used_by} 台</td>
+        <td class="muted">${fmtTime(k.created_at)}</td>
+        <td><button type="button" class="ghost danger" data-del-key="${k.id}" ${k.used_by ? "disabled title=\"仍有服务器在使用\"" : ""}>删除</button></td></tr>`).join("")}</table>`
+    : `<p class="hint">还没有云端密钥</p>`;
 }
 
 async function loadServers() {
@@ -127,7 +164,9 @@ function renderDetail() {
       </div>
     </div>
     <div class="facts">
-      <div><span>认证</span>${s.auth_type === "key" ? `密钥 ${esc(s.identity_file || "(默认)")}` : `密码 ${s.has_password ? "(已加密保存)" : "(未设置)"}`}</div>
+      <div><span>认证</span>${s.auth_type === "key"
+        ? (s.key_id ? `云端密钥 ${esc(state.keys.find((k) => k.id === s.key_id)?.name || "")}` : `密钥 ${esc(s.identity_file || "(默认)")}`)
+        : `密码 ${s.has_password ? "(已加密保存)" : "(未设置)"}`}</div>
       <div><span>环境</span>${esc(s.environment)}</div>
       <div><span>标签</span>${esc((s.tags || []).join(", ") || "—")}</div>
       <div><span>位置</span>${esc(s.location || "—")}</div>
@@ -300,8 +339,10 @@ async function renderLogs(body) {
 // ---------- 表单 ----------
 
 function syncAuthFields() {
-  const type = $("#server-form").auth_type.value;
+  const f = $("#server-form");
+  const type = f.auth_type.value;
   document.querySelectorAll("[data-auth]").forEach((el) => (el.style.display = el.dataset.auth === type ? "" : "none"));
+  if (type === "key" && f.key_id.value) $("#identity-file-label").style.display = "none";
 }
 
 function openForm(server) {
@@ -311,7 +352,7 @@ function openForm(server) {
   $("#form-title").textContent = server ? `编辑 ${server.alias}` : "新增服务器";
   $("#form-error").textContent = "";
   if (server) {
-    for (const k of ["alias", "hostname", "port", "username", "auth_type", "identity_file", "proxy_jump", "environment", "location", "description"]) f[k].value = server[k] ?? "";
+    for (const k of ["alias", "hostname", "port", "username", "auth_type", "identity_file", "key_id", "proxy_jump", "environment", "location", "description"]) f[k].value = server[k] ?? "";
     f.tags.value = (server.tags || []).join(", ");
   }
   f.password.placeholder = server?.has_password ? "留空则保持不变" : "";
@@ -328,7 +369,8 @@ $("#server-form").addEventListener("submit", async (e) => {
     const body = {
       alias: f.alias.value.trim(), hostname: f.hostname.value.trim(), port: +f.port.value || 22,
       username: f.username.value.trim(), auth_type: f.auth_type.value,
-      identity_file: f.identity_file.value.trim() || null,
+      identity_file: f.key_id.value ? null : f.identity_file.value.trim() || null,
+      key_id: f.key_id.value || null,
       proxy_jump: f.proxy_jump.value.trim() || null, environment: f.environment.value,
       tags: f.tags.value.split(/[,，]/).map((t) => t.trim()).filter(Boolean),
       location: f.location.value.trim(), description: f.description.value.trim(),
@@ -356,6 +398,43 @@ $("#server-form").addEventListener("submit", async (e) => {
 // ---------- 事件 ----------
 
 $("#server-form").auth_type.addEventListener("change", syncAuthFields);
+$("#server-form").key_id.addEventListener("change", syncAuthFields);
+
+$("#btn-keys").addEventListener("click", (e) => busy(e.target, async () => {
+  await loadKeys();
+  $("#key-error").textContent = "";
+  $("#keys-dialog").showModal();
+}));
+
+$("#keys-list").addEventListener("click", (e) => {
+  const id = e.target.dataset.delKey;
+  if (!id || !confirm("删除这个云端密钥？已写到本机的密钥文件不会被删除。")) return;
+  busy(e.target, async () => { await api(`/api/keys/${id}`, { method: "DELETE" }); await loadKeys(); toast("已删除"); });
+});
+
+$("#key-file").addEventListener("change", (e) => {
+  const file = e.target.files[0];
+  if (file && !$("#key-name").value) $("#key-name").value = file.name.replace(/[^A-Za-z0-9._-]/g, "-");
+});
+
+$("#btn-key-upload").addEventListener("click", (e) => busy(e.target, async () => {
+  $("#key-error").textContent = "";
+  try {
+    const name = $("#key-name").value.trim();
+    if (!/^[A-Za-z0-9._-]+$/.test(name)) throw new Error("名称只能包含字母、数字、. _ -");
+    const file = $("#key-file").files[0];
+    const bytes = file ? new Uint8Array(await file.arrayBuffer()) : new TextEncoder().encode($("#key-text").value.trim() + "\n");
+    const text = new TextDecoder().decode(bytes);
+    if (!/-----BEGIN [A-Z ]*PRIVATE KEY-----/.test(text)) throw new Error("看起来不是私钥文件（缺少 BEGIN ... PRIVATE KEY）");
+    if (/ENCRYPTED|Proc-Type: 4,ENCRYPTED/.test(text)) throw new Error("暂不支持带口令的私钥");
+    if (bytes.length > 64 * 1024) throw new Error("文件过大");
+    const key_encrypted = await sealData(bytes);
+    await api("/api/keys", { method: "POST", body: { name, comment: $("#key-comment").value.trim(), key_encrypted } });
+    for (const id of ["#key-name", "#key-comment", "#key-file", "#key-text"]) $(id).value = "";
+    await loadKeys();
+    toast(`已加密上传 ${name}`);
+  } catch (err) { $("#key-error").textContent = err.message; }
+}));
 document.querySelectorAll("[data-close]").forEach((b) => b.addEventListener("click", () => b.closest("dialog").close()));
 $("#btn-add").addEventListener("click", () => openForm(null));
 $("#search").addEventListener("input", renderList);
@@ -420,13 +499,15 @@ $("#btn-import").addEventListener("click", (e) => busy(e.target, async () => {
 $("#btn-do-import").addEventListener("click", (e) => busy(e.target, async () => {
   const aliases = [...document.querySelectorAll("#import-list input:checked")].map((i) => i.value);
   if (!aliases.length) return;
-  const r = await runJob("import", { payload: { aliases } });
+  const r = await runJob("import", { payload: { aliases, upload_keys: $("#import-upload-keys").checked } });
   const bad = Object.entries(r.errors || {});
   toast(bad.length ? `导入失败：${bad.map(([a, err]) => `${a}(${err})`).join("，")}` : `已导入 ${(r.imported || []).length} 台`);
   $("#import-dialog").close();
+  loadKeys().catch(() => {});
   loadServers();
 }));
 
 loadStatus().catch((e) => toast(e.message));
+loadKeys().catch((e) => toast(e.message));
 loadServers().catch((e) => toast(e.message));
 setInterval(() => loadStatus().catch(() => {}), 30_000);

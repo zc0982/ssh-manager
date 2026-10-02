@@ -12,6 +12,7 @@
   <div class="brand">SSH Manager</div>
   <div id="status" class="status"></div>
   <div class="actions">
+    <button id="btn-keys" class="ghost">密钥</button>
     <button id="btn-import" class="ghost">从本机导入</button>
     <button id="btn-pull" class="ghost">全部同步到本机</button>
     <button id="btn-add" class="primary">新增服务器</button>
@@ -51,7 +52,10 @@
           <option value="password">密码</option>
         </select>
       </label>
-      <label data-auth="key">密钥文件（本机路径）<input name="identity_file" placeholder="~/.ssh/id_ed25519"></label>
+      <label data-auth="key">密钥
+        <select name="key_id"><option value="">使用本机密钥文件路径</option></select>
+      </label>
+      <label data-auth="key" id="identity-file-label">本机密钥文件路径<input name="identity_file" placeholder="~/.ssh/id_ed25519"></label>
       <label data-auth="password">密码<input name="password" type="password" autocomplete="new-password"></label>
       <label>标签<input name="tags" placeholder="web, nginx（逗号分隔）"></label>
       <label>位置<input name="location" placeholder="阿里云-北京"></label>
@@ -70,9 +74,30 @@
   <form method="dialog">
     <h2>从本机 ~/.ssh/config 导入到云端</h2>
     <div id="import-list" class="import-list"></div>
+    <label class="check"><input type="checkbox" id="import-upload-keys" checked> 同时把这些主机使用的私钥文件加密上传到云端</label>
     <div class="dialog-actions">
       <button type="button" class="ghost" data-close>取消</button>
       <button type="button" class="primary" id="btn-do-import">导入所选</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="keys-dialog">
+  <form method="dialog">
+    <h2>云端 SSH 密钥</h2>
+    <p class="hint">私钥在浏览器里用本机 agent 的公钥加密后才上传，云端只保存密文。同步时由 agent 解密写到 <code>~/.ssh/ssh-manager/&lt;名称&gt;.key</code>（权限 600）。暂不支持带口令的私钥。</p>
+    <div id="keys-list" class="table-wrap"></div>
+    <h3>上传私钥</h3>
+    <div class="grid">
+      <label>名称<input id="key-name" pattern="[A-Za-z0-9._\-]+" placeholder="prod-deploy"></label>
+      <label>说明<input id="key-comment" placeholder="可选"></label>
+      <label class="full">私钥文件<input id="key-file" type="file"></label>
+      <label class="full">或直接粘贴<textarea id="key-text" rows="5" placeholder="-----BEGIN OPENSSH PRIVATE KEY-----"></textarea></label>
+    </div>
+    <p class="error" id="key-error"></p>
+    <div class="dialog-actions">
+      <button type="button" class="ghost" data-close>关闭</button>
+      <button type="button" class="primary" id="btn-key-upload">加密并上传</button>
     </div>
   </form>
 </dialog>

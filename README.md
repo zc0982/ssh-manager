@@ -21,7 +21,9 @@ SSH 连接管理系统：服务器清单存在云端，网页托管在 Cloudflar
 |---|---|
 | 服务器增删改查 | 别名、主机、端口、用户、密钥/密码、跳板机、环境、标签、位置、备注 |
 | 同步到本机 | 保存后自动写入 agent 所在电脑的 `~/.ssh/config`（ssh-skill 的注释元数据格式），Claude Code 里的 ssh-skill 也能直接用这些别名；换电脑时可「全部同步到本机」 |
-| 从本机导入 | 把 `~/.ssh/config` 里已有的主机导入云端 |
+| 从本机导入 | 把 `~/.ssh/config` 里已有的主机导入云端，可同时把它们使用的私钥文件加密上传 |
+| 云端 SSH 私钥 | 在网页上传私钥（浏览器端加密），多台服务器可共用；同步时 agent 解密写到 `~/.ssh/ssh-manager/<名称>.key`（600 权限）。换电脑不用再拷私钥 |
+| agent 私钥云端备份 | `backup-key` 用主密码加密后存到云端，新电脑上 `restore-key` 恢复 |
 | 测试连接 / 执行命令 | `ssh_execute.py`，支持超时、只读重试和命令历史 |
 | 文件传输 | `ssh_upload.py` / `ssh_download.py`，路径是 agent 所在电脑的本地路径 |
 | SSH 隧道 | `ssh_tunnel.py`，隧道监听在 agent 所在电脑的 127.0.0.1 |
@@ -32,7 +34,9 @@ SSH 连接管理系统：服务器清单存在云端，网页托管在 Cloudflar
 - **登录**：整个站点由 Cloudflare Access 保护，只允许指定邮箱登录；Worker 还会再校验一次 Access JWT 的签名、aud 和邮箱，防止绕过 Access（比如通过 preview URL 访问）。
 - **agent 身份**：agent 用 Access service token 访问，Worker 只允许这个 service token 调用 `/api/agent/*`。
 - **密码**：agent 第一次启动时在本机生成 RSA 密钥对（`~/.config/ssh-manager/agent_key.pem`，权限 600），把公钥登记到云端。网页在浏览器里用公钥加密密码后才上传，Worker 和数据库都只能看到密文，只有本机 agent 能解密。
-  - 多台电脑运行 agent 时，需要共用同一份私钥文件。私钥丢失后，已保存的密码无法解密，需要重新填写。
+  - **SSH 私钥**同样端到端加密：随机 AES-256-GCM 密钥加密内容，再用 agent 公钥（RSA-OAEP）包裹 AES 密钥。暂不支持带口令的私钥。
+  - **agent 私钥**可以用你的主密码（scrypt 派生 + AES-256-GCM）加密后备份到云端；主密码只在本机输入，不会上传。云端拿到的只有密文，安全性取决于主密码强度（至少 12 位）。
+  - 多台电脑运行 agent 时，在新电脑上执行 `restore-key` 即可得到同一把 agent 私钥。
   - ssh-skill 的约定是把密码以明文写在本机 `~/.ssh/config` 的 `# password:` 注释里，所以能用密钥认证时建议用密钥。
 - **跨站请求**：浏览器的写请求必须带 `X-SSH-Manager` 头。
 - **本机配置**：第一次改写 `~/.ssh/config` 前会备份为 `~/.ssh/config.ssh-manager.bak`。
@@ -41,7 +45,7 @@ SSH 连接管理系统：服务器清单存在云端，网页托管在 Cloudflar
 
 需要：Supabase 账号、Cloudflare 账号（已开通 Zero Trust）、[`cf` CLI](https://www.npmjs.com/package/cf)、Node.js 22+、[uv](https://docs.astral.sh/uv/)、已安装的 ssh-skill。
 
-1. **数据库**：创建 Supabase 项目（免费额度即可），执行 `db/migrations/001_init.sql`。迁移会给所有表开启 RLS 并收回 `anon`/`authenticated` 的权限，因此 Supabase 的 Data API 读不到这些表。
+1. **数据库**：创建 Supabase 项目（免费额度即可），按顺序执行 `db/migrations/` 下的 SQL。迁移会给所有表开启 RLS 并收回 `anon`/`authenticated` 的权限，因此 Supabase 的 Data API 读不到这些表。
 2. **Hyperdrive**：用 Supabase 的 **Session pooler** 连接串（`aws-0-<region>.pooler.supabase.com:5432`，用户名 `postgres.<project-ref>`；直连地址只有 IPv6，Hyperdrive 连不上）创建 Hyperdrive 配置并**关闭缓存**（任务队列需要实时读取），把 ID 填到 `worker/cloudflare.config.ts`。
 3. **部署 Worker**：
 
@@ -59,6 +63,9 @@ SSH 连接管理系统：服务器清单存在云端，网页托管在 Cloudflar
    ```
 
    安装为开机自启（macOS）：`uv run python -m ssh_agent install-launchd`
+
+6. **备份 agent 私钥**（强烈建议）：`uv run python -m ssh_agent backup-key`，按提示设置主密码。
+   换电脑时：配置好 `agent/.env` 后先运行 `uv run python -m ssh_agent restore-key`，再启动 agent。
 
 ## 开发
 

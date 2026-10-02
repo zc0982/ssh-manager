@@ -116,3 +116,86 @@ def test_postgres_array_literal_tags(env):
     h, _, cfg = env
     assert h.handle({"type": "sync", "server": server(tags="{e2e,web}"), "payload": {}})[0]["success"]
     assert "# tags: e2e,web" in cfg.read_text()
+
+
+FAKE_KEY = b"-----BEGIN OPENSSH PRIVATE KEY-----\nZmFrZS1rZXktZm9yLXRlc3Rz\n-----END OPENSSH PRIVATE KEY-----\n"
+
+
+def test_seal_roundtrip_and_tamper(tmp_path):
+    k = KeyPair.load_or_create(tmp_path / "k.pem")
+    token = k.seal(FAKE_KEY)
+    assert token.startswith("v1.") and k.unseal(token) == FAKE_KEY
+    v, w, iv, ct = token.split(".")
+    bad = ".".join([v, w, iv, ("A" if ct[0] != "A" else "B") + ct[1:]])
+    with pytest.raises(RuntimeError):
+        k.unseal(bad)
+
+
+@pytest.mark.skipif(not shutil.which("node"), reason="需要 node")
+def test_webcrypto_sealed_key_unseals(tmp_path):
+    """与 client/app.js 的 sealData 相同的 WebCrypto 流程。"""
+    k = KeyPair.load_or_create(tmp_path / "k.pem")
+    script = """
+const b64 = (buf) => Buffer.from(buf).toString("base64");
+const jwk = JSON.parse(process.argv[1]);
+const pub = await crypto.subtle.importKey("jwk", jwk, { name: "RSA-OAEP", hash: "SHA-256" }, false, ["encrypt"]);
+const aes = await crypto.subtle.generateKey({ name: "AES-GCM", length: 256 }, true, ["encrypt"]);
+const iv = crypto.getRandomValues(new Uint8Array(12));
+const ct = await crypto.subtle.encrypt({ name: "AES-GCM", iv }, aes, new TextEncoder().encode(process.argv[2]));
+const wrapped = await crypto.subtle.encrypt({ name: "RSA-OAEP" }, pub, await crypto.subtle.exportKey("raw", aes));
+console.log(`v1.${b64(wrapped)}.${b64(iv)}.${b64(ct)}`);
+"""
+    out = subprocess.run(["node", "--input-type=module", "-e", script, json.dumps(k.public_jwk), FAKE_KEY.decode()],
+                         capture_output=True, text=True, check=True).stdout.strip()
+    assert k.unseal(out) == FAKE_KEY
+
+
+def test_agent_key_backup_restore(tmp_path):
+    k = KeyPair.load_or_create(tmp_path / "k.pem")
+    backup = k.export_backup("correct horse battery")
+    assert "PRIVATE" not in json.dumps(backup) and backup["public_n"] == k.public_jwk["n"]
+    with pytest.raises(RuntimeError, match="主密码错误"):
+        KeyPair.restore_backup(backup, "wrong passphrase!", tmp_path / "r1.pem")
+    restored = KeyPair.restore_backup(backup, "correct horse battery", tmp_path / "r2.pem")
+    assert restored.matches(k.public_jwk)
+    assert oct((tmp_path / "r2.pem").stat().st_mode & 0o777) == "0o600"
+    assert restored.decrypt(k.encrypt("x")) == "x"
+    with pytest.raises(RuntimeError, match="已存在"):
+        KeyPair.restore_backup(backup, "correct horse battery", tmp_path / "r2.pem")
+
+
+def test_sync_with_cloud_key_writes_identity_file(env):
+    h, keys, cfg = env
+    s = server(key_id="k1", key={"id": "k1", "name": "deploy", "key_encrypted": keys.seal(FAKE_KEY)})
+    r, _ = h.handle({"type": "sync", "server": s, "payload": {}})
+    assert r["success"], r
+    path = h.skill.home / ".ssh" / "ssh-manager" / "deploy.key"
+    assert path.read_bytes() == FAKE_KEY
+    assert oct(path.stat().st_mode & 0o777) == "0o600" and oct(path.parent.stat().st_mode & 0o777) == "0o700"
+    assert f"IdentityFile {path}" in cfg.read_text()
+    # 引用了密钥但密钥行缺失（被删除）时明确报错
+    r, _ = h.handle({"type": "sync", "server": server(key_id="gone", updated_at="x"), "payload": {}})
+    assert r["success"] is False and "云端密钥不存在" in r["error"]
+
+
+def test_import_uploads_and_dedupes_keys(env):
+    h, keys, cfg = env
+    keyfile = h.skill.home / ".ssh" / "id_test"
+    keyfile.write_bytes(FAKE_KEY)
+    with cfg.open("a") as f:
+        f.write(f"Host a1\n    HostName 10.0.0.1\n    User u\n    IdentityFile {keyfile}\n\n"
+                f"Host a2\n    HostName 10.0.0.2\n    User u\n    IdentityFile {keyfile}\n\n")
+    # 云端已有一把同名但内容不同的 id_test
+    cloud = [{"name": "id_test", "key_encrypted": keys.seal(b"-----BEGIN OPENSSH PRIVATE KEY-----\nother\n")}]
+    _, extra = h.handle({"type": "import", "servers": [], "keys": cloud, "payload": {"aliases": ["a1", "a2"], "upload_keys": True}})
+    rows = {r["alias"]: r for r in extra["import_rows"]}
+    assert rows["a1"]["key"]["name"] == "id_test-2" and keys.unseal(rows["a1"]["key"]["key_encrypted"]) == FAKE_KEY
+    assert rows["a1"]["identity_file"] is None
+    assert rows["a2"]["key"] == {"name": "id_test-2", "existing": True}  # 同批次复用
+    # 云端已有同内容的密钥时直接复用
+    cloud2 = [{"name": "mine", "key_encrypted": keys.seal(FAKE_KEY)}]
+    _, extra = h.handle({"type": "import", "servers": [], "keys": cloud2, "payload": {"aliases": ["a1"], "upload_keys": True}})
+    assert extra["import_rows"][0]["key"] == {"name": "mine", "existing": True}
+    # 不勾选上传时保留本机路径
+    _, extra = h.handle({"type": "import", "servers": [], "keys": [], "payload": {"aliases": ["a1"]}})
+    assert extra["import_rows"][0]["key"] is None and extra["import_rows"][0]["identity_file"]

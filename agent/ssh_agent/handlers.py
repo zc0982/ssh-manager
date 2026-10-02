@@ -1,8 +1,13 @@
 """任务处理：每种任务类型对应一个函数，返回 (result, extra)，extra 会合并进回传给 Worker 的请求体。"""
+import os
+import re
+from pathlib import Path
+
 from .keys import KeyPair
 from .skill import ALIAS_RE, SkillBridge, SkillError
 
 TEST_COMMAND = "hostname && uptime && (uname -sr || true)"
+MAX_KEY_FILE = 64 * 1024
 
 
 class Handlers:
@@ -27,7 +32,27 @@ class Handlers:
         enc = server.get("password_encrypted")
         return self.keys.decrypt(enc) if enc and server.get("auth_type") == "password" else None
 
+    def _write_key(self, key: dict) -> Path:
+        """把云端密钥解密写到 ~/.ssh/ssh-manager/<name>.key（目录 700，文件 600）。"""
+        if not ALIAS_RE.match(key["name"]):
+            raise RuntimeError(f"非法密钥名：{key['name']}")
+        data = self.keys.unseal(key["key_encrypted"])
+        d = self.skill.home / ".ssh" / "ssh-manager"
+        d.mkdir(mode=0o700, parents=True, exist_ok=True)
+        path = d / f"{key['name']}.key"
+        if not path.exists() or path.read_bytes() != data:
+            tmp = path.with_suffix(".tmp")
+            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "wb") as f:
+                f.write(data)
+            os.replace(tmp, path)
+        return path
+
     def _sync(self, server: dict) -> dict:
+        if server.get("auth_type") == "key" and server.get("key"):
+            server = {**server, "identity_file": str(self._write_key(server["key"]))}
+        elif server.get("key_id") and not server.get("key"):
+            raise RuntimeError("服务器引用的云端密钥不存在")
         r = self.skill.sync_server(server, self._password(server))
         self._synced[server["alias"]] = server["updated_at"]
         return r
@@ -115,6 +140,13 @@ class Handlers:
 
     def do_import(self, job):
         wanted = set(job["payload"].get("aliases") or [])
+        upload_keys = bool(job["payload"].get("upload_keys"))
+        cloud_keys = {}  # name -> 明文，用于比对去重
+        for k in job.get("keys") or []:
+            try:
+                cloud_keys[k["name"]] = self.keys.unseal(k["key_encrypted"])
+            except RuntimeError:
+                cloud_keys[k["name"]] = None
         cloud = {s["alias"] for s in job.get("servers") or []}
         rows = []
         for h in self.skill.local_hosts():
@@ -124,13 +156,35 @@ class Handlers:
             meta = h.get("metadata") or {}
             pw = meta.get("password")
             auth = "password" if pw and not h.get("identity_file") else "key"
+            key = self._local_key(h.get("identity_file"), cloud_keys) if auth == "key" and upload_keys else None
             rows.append({
                 "alias": alias, "hostname": h.get("hostname") or alias, "port": int(h.get("port") or 22),
                 "username": h.get("user") or "root", "auth_type": auth,
-                "identity_file": h.get("identity_file") if auth == "key" else None,
+                "identity_file": h.get("identity_file") if auth == "key" and not key else None,
+                "key": key,
                 "password_encrypted": self.keys.encrypt(pw) if pw and auth == "password" else None,
                 "proxy_jump": h.get("proxy_jump"), "environment": meta.get("environment") or "development",
                 "tags": meta.get("tags") or [], "location": meta.get("location", ""),
                 "description": meta.get("description", ""),
             })
         return {"success": True, "requested": sorted(wanted)}, {"import_rows": rows}
+
+    def _local_key(self, identity_file: str | None, cloud_keys: dict) -> dict | None:
+        """读取本机私钥文件并加密，用于导入到云端。读不到就保留本机路径。"""
+        if not identity_file:
+            return None
+        path = Path(os.path.expanduser(identity_file))
+        if not path.is_file() or path.stat().st_size > MAX_KEY_FILE:
+            return None
+        data = path.read_bytes()
+        if b"PRIVATE KEY" not in data:
+            return None
+        for name, plain in cloud_keys.items():
+            if plain == data:
+                return {"name": name, "existing": True}
+        base = re.sub(r"[^A-Za-z0-9._-]", "-", path.name)[:60] or "key"
+        name, n = base, 2
+        while name in cloud_keys:
+            name, n = f"{base}-{n}", n + 1
+        cloud_keys[name] = data  # 同一批次中其他主机引用同一文件时复用
+        return {"name": name, "comment": f"从 {identity_file} 导入", "key_encrypted": self.keys.seal(data)}

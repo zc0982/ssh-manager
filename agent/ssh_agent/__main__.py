@@ -3,8 +3,11 @@
     uv run python -m ssh_agent run               # 前台运行
     uv run python -m ssh_agent install-launchd   # 安装为 macOS 登录后自动启动的服务
     uv run python -m ssh_agent pubkey            # 打印公钥（JWK）
+    uv run python -m ssh_agent backup-key        # 用主密码加密 agent 私钥并备份到云端
+    uv run python -m ssh_agent restore-key       # 在新电脑上用主密码从云端恢复 agent 私钥
 """
 import argparse
+import getpass
 import json
 import logging
 import os
@@ -72,9 +75,13 @@ def run() -> None:
     status = skill.check()
     if not status["ok"]:
         sys.exit(status["error"])
+    client = make_client()
+    if not key_path().exists():
+        backup = check(client.get("/api/agent/key-backup")).get("backup")
+        if backup:
+            sys.exit(f"本机没有 agent 私钥，但云端有备份。请先运行：uv run python -m ssh_agent restore-key")
     keys = KeyPair.load_or_create(key_path())
     handlers = Handlers(skill, keys)
-    client = make_client()
 
     hello = check(client.post("/api/agent/hello", json={
         "name": agent_name(), "hostname": socket.gethostname(), "version": VERSION, "public_key": keys.public_jwk}))
@@ -143,16 +150,50 @@ def install_launchd() -> None:
     print(f"已安装并启动：{plist}\n日志：{logdir}/agent.log")
 
 
+def _ask_passphrase(confirm: bool) -> str:
+    pw = getpass.getpass("主密码：")
+    if confirm:
+        if len(pw) < 12:
+            sys.exit("主密码至少 12 个字符")
+        if getpass.getpass("再输入一次：") != pw:
+            sys.exit("两次输入不一致")
+    return pw
+
+
+def backup_key() -> None:
+    if not key_path().exists():
+        sys.exit(f"本机没有 agent 私钥：{key_path()}")
+    keys = KeyPair.load_or_create(key_path())
+    client = make_client()
+    print("将用主密码加密 agent 私钥后上传到云端。主密码不会上传，忘记后无法恢复。")
+    backup = keys.export_backup(_ask_passphrase(confirm=True))
+    check(client.put("/api/agent/key-backup", json={"backup": backup}))
+    print("已备份到云端。")
+
+
+def restore_key() -> None:
+    client = make_client()
+    backup = check(client.get("/api/agent/key-backup")).get("backup")
+    if not backup:
+        sys.exit("云端没有 agent 私钥备份")
+    keys = KeyPair.restore_backup(backup, _ask_passphrase(confirm=False), key_path())
+    print(f"已恢复到 {key_path()}（公钥指纹匹配：{keys.public_jwk['n'] == backup.get('public_n')}）")
+
+
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     logging.getLogger("httpx").setLevel(logging.WARNING)
     p = argparse.ArgumentParser(prog="ssh_agent")
-    p.add_argument("command", choices=["run", "install-launchd", "pubkey"])
+    p.add_argument("command", choices=["run", "install-launchd", "pubkey", "backup-key", "restore-key"])
     args = p.parse_args()
     if args.command == "run":
         run()
     elif args.command == "install-launchd":
         install_launchd()
+    elif args.command == "backup-key":
+        backup_key()
+    elif args.command == "restore-key":
+        restore_key()
     else:
         print(json.dumps(KeyPair.load_or_create(key_path()).public_jwk, indent=2))
 

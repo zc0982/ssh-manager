@@ -18,7 +18,8 @@ button:disabled { opacity: .5; cursor: default; }
 button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
 button.ghost:hover { background: var(--accent-weak); }
 button.danger { color: var(--err); }
-input, select { width: 100%; padding: 7px 9px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg); }
+textarea { font: 12px/1.4 var(--mono); color: inherit; resize: vertical; }
+input, select, textarea { width: 100%; padding: 7px 9px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg); }
 input:focus, select:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
 
 .top { display: flex; align-items: center; gap: 16px; padding: 10px 20px; background: var(--panel); border-bottom: 1px solid var(--border); flex-wrap: wrap; }
@@ -76,6 +77,10 @@ td.mono { font-family: var(--mono); word-break: break-all; }
 dialog { border: 1px solid var(--border); border-radius: 12px; background: var(--panel); color: var(--text); padding: 20px 24px; width: min(640px, 92vw); }
 dialog::backdrop { background: rgba(0,0,0,.35); }
 dialog h2 { margin: 0 0 16px; font-size: 17px; }
+dialog h3 { margin: 18px 0 8px; font-size: 14px; }
+label.check { display: flex; gap: 6px; align-items: center; font-size: 13px; color: var(--muted); margin-top: 10px; }
+label.check input { width: auto; }
+code { font-family: var(--mono); font-size: 12px; }
 .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px 14px; }
 .grid label { font-size: 12px; color: var(--muted); display: flex; flex-direction: column; gap: 4px; }
 .grid .full { grid-column: 1 / -1; }
