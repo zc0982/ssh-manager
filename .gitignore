@@ -1,0 +1,12 @@
+.env
+.env.*
+!.env.example
+.dev.vars
+.venv/
+__pycache__/
+.pytest_cache/
+node_modules/
+.cloudflare/
+.playwright-mcp/
+*.pem
+.DS_Store

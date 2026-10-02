@@ -1,0 +1,20 @@
+[project]
+name = "ssh-manager-agent"
+version = "0.2.0"
+description = "SSH Manager 本机 agent：从 Cloudflare Worker 领取任务，通过本机 ssh-skill 执行"
+requires-python = ">=3.11"
+dependencies = [
+    "httpx>=0.27",
+    "python-dotenv>=1.0",
+    "cryptography>=43",
+]
+
+[dependency-groups]
+dev = ["pytest>=8"]
+
+[tool.uv]
+package = false
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]

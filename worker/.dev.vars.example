@@ -1,0 +1,6 @@
+# 本地 cf dev 使用：localhost 访问时直接以该邮箱身份登录（线上不生效）
+DEV_EMAIL=you@example.com
+ACCESS_TEAM_DOMAIN=https://yourteam.cloudflareaccess.com
+ACCESS_AUD=
+ALLOWED_EMAILS=you@example.com
+AGENT_CLIENT_ID=
