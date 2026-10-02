@@ -241,7 +241,7 @@ def test_setup_wizard_end_to_end(tmp_path, monkeypatch):
 
     real_client = httpx.Client
     monkeypatch.setattr(wizard.httpx, "Client", lambda **kw: real_client(transport=httpx.MockTransport(handler), **kw))
-    monkeypatch.setattr(wizard, "ENV_FILE", tmp_path / "agent.env")
+    monkeypatch.setattr(wizard.paths, "ENV_FILE", tmp_path / "agent.env")
     answers = iter(["wrong passphrase", "master passphrase"])
     monkeypatch.setattr(wizard.getpass, "getpass", lambda prompt="": next(answers))
     monkeypatch.setattr("builtins.input", lambda prompt="": "y")
@@ -273,3 +273,53 @@ def test_setup_rejects_v1_bundle(tmp_path, monkeypatch):
     with pytest.raises(SystemExit):
         wizard.run_setup(str(bundle), tmp_path / "new.pem", SKILL_DIR, "x", lambda: None)
     assert not (tmp_path / "new.pem").exists()
+
+
+def test_setup_via_pairing_url(tmp_path, monkeypatch):
+    """一条命令安装：向导从配对链接取设置包（不需要源代码和下载文件）。"""
+    import httpx
+    from ssh_agent import setup as wizard
+
+    home = tmp_path / "home"
+    (home / ".ssh").mkdir(parents=True)
+    old = KeyPair.load_or_create(tmp_path / "old.pem")
+    env = {"SSH_MANAGER_URL": "https://x.example", "CF_ACCESS_CLIENT_ID": "cid.access", "CF_ACCESS_CLIENT_SECRET": "sec"}
+    bundle = {"url": "https://x.example", "backup": old.export_backup("master passphrase", env)}
+    pair_url = "https://x.example/pair/" + "A" * 43 + "/bundle"
+    fetched = []
+
+    def fake_get(url, timeout=None):
+        fetched.append(url)
+        return httpx.Response(200, json=bundle, request=httpx.Request("GET", url))
+
+    def handler(req: httpx.Request):
+        if req.url.path == "/api/agent/hello":
+            return httpx.Response(200, json={"agent_id": "a1", "public_key": old.public_jwk})
+        return httpx.Response(200, json=[server(alias="paired-01")])
+
+    real_client = httpx.Client
+    monkeypatch.setattr(wizard.httpx, "get", fake_get)
+    monkeypatch.setattr(wizard.httpx, "Client", lambda **kw: real_client(transport=httpx.MockTransport(handler), **kw))
+    monkeypatch.setattr(wizard.paths, "ENV_FILE", tmp_path / "cfg" / ".env")
+    monkeypatch.setattr(wizard.getpass, "getpass", lambda prompt="": "master passphrase")
+    monkeypatch.setattr("builtins.input", lambda prompt="": "n")  # 不装后台服务
+    monkeypatch.setattr(wizard, "SkillBridge", lambda d: SkillBridge(SKILL_DIR, home=home))
+
+    key_path = tmp_path / "agent_key.pem"
+    wizard.run_setup(pair_url, key_path, SKILL_DIR, "new-mac", lambda: pytest.fail("不应安装后台服务"))
+
+    assert fetched == [pair_url]
+    assert KeyPair.load_or_create(key_path).matches(old.public_jwk)
+    assert "CF_ACCESS_CLIENT_SECRET=sec" in (tmp_path / "cfg" / ".env").read_text()
+    assert "Host paired-01" in (home / ".ssh" / "config").read_text()
+
+
+def test_setup_pairing_url_rejected(tmp_path, monkeypatch):
+    import httpx
+    from ssh_agent import setup as wizard
+    monkeypatch.setattr(wizard.httpx, "get", lambda url, timeout=None: httpx.Response(
+        410, json={"detail": "配对码无效、已过期或已使用"}, headers={"content-type": "application/json"}, request=httpx.Request("GET", url)))
+    monkeypatch.setattr(wizard, "SkillBridge", lambda d: SkillBridge(SKILL_DIR, home=tmp_path))
+    with pytest.raises(SystemExit):
+        wizard.run_setup("https://x.example/pair/x/bundle", tmp_path / "k.pem", SKILL_DIR, "x", lambda: None)
+    assert not (tmp_path / "k.pem").exists()

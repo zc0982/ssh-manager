@@ -70,16 +70,20 @@ SSH 连接管理系统：服务器清单存在云端，网页托管在 Cloudflar
 
 ## 换电脑
 
-1. 新电脑上准备好 uv、git 和 ssh-skill（`~/.claude/skills/ssh-skill`）。
-2. 浏览器打开网页，登录后点「新电脑」→ 下载 `ssh-manager-setup.json`（内容仍是主密码加密的）。
-3. 运行向导，按提示输入主密码：
+不需要下载源代码：
+
+1. 新电脑上装好 [uv](https://docs.astral.sh/uv/) 和 ssh-skill（`~/.claude/skills/ssh-skill`）。
+2. 网页上点「新电脑」→「生成安装命令」，得到一条带一次性配对码（10 分钟有效、只能用一次）的命令，粘贴到新电脑终端运行：
 
    ```bash
-   git clone https://github.com/zc0982/ssh-manager.git
-   cd ssh-manager && ./setup.sh
+   curl -fsSL https://<你的域名>/pair/<配对码>/install.sh | bash
    ```
 
-   向导会：检查环境 → 解密设置文件 → 写入 agent 私钥和 `agent/.env`（600 权限）→ 连接云端并把所有服务器（含云端私钥）同步到 `~/.ssh/config` → 安装开机自启的后台服务。
+3. 按提示输入主密码。命令会把单文件 agent（`ssh-manager-agent.pyz`，由 `worker/scripts/build-agent.mjs` 在构建时打包）装到 `~/.ssh-manager/`，在本机解密后写入 agent 私钥与连接凭证、把所有服务器（含云端私钥）同步到 `~/.ssh/config`，并安装开机自启的后台服务。
+
+`/pair/*` 需要在 Cloudflare Access 里单独设为 Bypass（由 Worker 校验配对码）；设置包本身仍是主密码加密的。
+
+备用方式：下载 `ssh-manager-setup.json` 后用源代码里的 `./setup.sh` 运行向导。
 
 `setup.sh` 的其他用法：`./setup.sh backup`（更新云端备份）、`./setup.sh service`（安装/重启后台服务）、`./setup.sh status`（查看后台服务状态和日志）。
 

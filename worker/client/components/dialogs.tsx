@@ -1,5 +1,5 @@
-import { CopyIcon, DownloadIcon, KeyRoundIcon, Trash2Icon } from "lucide-react";
-import { useRef, useState } from "react";
+import { CopyIcon, DownloadIcon, KeyRoundIcon, TerminalIcon, Trash2Icon } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
@@ -187,46 +187,90 @@ export function ImportDialog({ open, onOpenChange, hosts, onDone }: Open & { hos
 
 // ---------- 新电脑向导 ----------
 
-const SETUP_CMD = "git clone https://github.com/zc0982/ssh-manager.git\ncd ssh-manager && ./setup.sh";
+const FALLBACK_CMD = "git clone https://github.com/zc0982/ssh-manager.git\ncd ssh-manager && ./setup.sh";
+
+async function copy(text: string) {
+	try { await navigator.clipboard.writeText(text); toast.success("已复制"); } catch { toast.error("复制失败，请手动复制"); }
+}
 
 export function NewPcDialog({ open, onOpenChange, status }: Open & { status: Status | null }) {
 	const ready = !!status?.key_backup_has_env;
+	const [pair, setPair] = useState<{ command: string; expires_at: string } | null>(null);
+	const [busy, setBusy] = useState(false);
+	const [now, setNow] = useState(Date.now());
+	const [showFallback, setShowFallback] = useState(false);
+
+	useEffect(() => {
+		if (!pair) return;
+		const t = setInterval(() => setNow(Date.now()), 1000);
+		return () => clearInterval(t);
+	}, [pair]);
+	useEffect(() => { if (!open) { setPair(null); setShowFallback(false); } }, [open]);
+
+	const left = pair ? Math.max(0, Math.floor((new Date(pair.expires_at).getTime() - now) / 1000)) : 0;
+
+	async function generate() {
+		setBusy(true);
+		try {
+			const r = await api<{ command: string; expires_at: string }>("/api/pairing", { method: "POST" });
+			setPair(r);
+			setNow(Date.now());
+		} catch (e: any) { toast.error(e.message); } finally { setBusy(false); }
+	}
+
 	return (
 		<Dialog open={open} onOpenChange={onOpenChange}>
 			<DialogContent className="sm:max-w-xl">
 				<DialogHeader>
 					<DialogTitle>在新电脑上使用 SSH Manager</DialogTitle>
 					<DialogDescription>
-						SSH 连接由电脑上的 agent 通过 ssh-skill 执行。换电脑后按下面的步骤设置，服务器配置、密码和云端私钥都会自动恢复。
+						不需要下载源代码：一条命令安装一个单文件 agent，输入主密码后，云端的服务器、密码和私钥会同步到新电脑的 ~/.ssh/config，供 ssh-skill 直接使用。
 					</DialogDescription>
 				</DialogHeader>
 				{!ready && (
 					<Alert variant="destructive">
 						<AlertTitle>{status?.key_backup ? "当前备份是旧格式" : "云端还没有备份"}</AlertTitle>
 						<AlertDescription>
-							请先在已经在用的电脑上运行 <code className="rounded bg-muted px-1">./setup.sh backup</code> 并设置主密码，再回来下载设置文件。
+							请先在已经在用的电脑上运行 <code className="rounded bg-muted px-1">./setup.sh backup</code> 并设置主密码。
 						</AlertDescription>
 					</Alert>
 				)}
 				<ol className="grid gap-4 text-sm">
-					<Step n={1} title="准备环境">
-						安装 <a className="underline" href="https://docs.astral.sh/uv/" target="_blank" rel="noopener">uv</a>、git，以及 ssh-skill（放在 <code className="rounded bg-muted px-1 text-xs">~/.claude/skills/ssh-skill</code>）。
+					<Step n={1} title="准备">
+						新电脑上装好 <a className="underline" href="https://docs.astral.sh/uv/" target="_blank" rel="noopener">uv</a> 和 ssh-skill（<code className="rounded bg-muted px-1 text-xs">~/.claude/skills/ssh-skill</code>）。
 					</Step>
-					<Step n={2} title="下载设置文件（已用你的主密码加密）">
-						<Button className="mt-2" disabled={!ready} onClick={() => { location.href = "/api/setup-bundle"; }}>
-							<DownloadIcon />下载 ssh-manager-setup.json
-						</Button>
+					<Step n={2} title="生成安装命令，粘贴到新电脑的终端运行">
+						{pair ? (
+							<>
+								<pre className="mt-2 rounded-md bg-muted p-3 font-mono text-xs break-all whitespace-pre-wrap">{pair.command}</pre>
+								<div className="mt-2 flex flex-wrap items-center gap-2">
+									<Button size="sm" onClick={() => copy(pair.command)}><CopyIcon />复制命令</Button>
+									{left > 0
+										? <span className="text-xs">{Math.floor(left / 60)}:{String(left % 60).padStart(2, "0")} 后失效 · 只能使用一次</span>
+										: <span className="text-xs text-destructive">已过期</span>}
+									{left === 0 && <Button size="sm" variant="outline" disabled={busy} onClick={generate}>重新生成</Button>}
+								</div>
+							</>
+						) : (
+							<Button className="mt-2" disabled={!ready || busy} onClick={generate}><TerminalIcon />{busy ? "生成中…" : "生成安装命令"}</Button>
+						)}
 					</Step>
-					<Step n={3} title="获取代码并运行向导，按提示输入主密码">
-						<pre className="mt-2 rounded-md bg-muted p-3 font-mono text-xs whitespace-pre-wrap">{SETUP_CMD}</pre>
-						<Button variant="outline" size="sm" className="mt-2" onClick={async () => {
-							try { await navigator.clipboard.writeText(SETUP_CMD); toast.success("已复制"); } catch { toast.error("复制失败，请手动复制"); }
-						}}><CopyIcon />复制命令</Button>
-					</Step>
-					<Step n={4} title="完成">
-						向导会写入 agent 私钥和连接凭证、把所有服务器同步到 ~/.ssh/config，并安装开机自启的后台服务。回到这个页面，顶部会显示新电脑的 agent 在线。
+					<Step n={3} title="输入主密码，完成">
+						命令会把 agent 装到 <code className="rounded bg-muted px-1 text-xs">~/.ssh-manager/</code>，解密后写入本机 SSH 配置并安装开机自启的后台服务。回到这个页面，顶部会显示新电脑的 agent 在线。
 					</Step>
 				</ol>
+				<div className="text-xs text-muted-foreground">
+					<button type="button" className="underline" onClick={() => setShowFallback(!showFallback)}>{showFallback ? "收起" : "备用方式（下载设置文件 + 源代码）"}</button>
+					{showFallback && (
+						<div className="mt-2 grid gap-2">
+							<Button size="sm" variant="outline" className="w-fit" disabled={!ready} onClick={() => { location.href = "/api/setup-bundle"; }}>
+								<DownloadIcon />下载 ssh-manager-setup.json
+							</Button>
+							<pre className="rounded-md bg-muted p-2 font-mono whitespace-pre-wrap">{FALLBACK_CMD}</pre>
+							<Button size="sm" variant="ghost" className="w-fit" onClick={() => copy(FALLBACK_CMD)}><CopyIcon />复制</Button>
+						</div>
+					)}
+				</div>
 				<p className="text-xs text-muted-foreground">
 					旧电脑不再使用时，可在终端运行 <code className="rounded bg-muted px-1">{"launchctl bootout gui/$(id -u)/com.ssh-manager.agent"}</code> 停掉它的 agent。
 				</p>

@@ -13,8 +13,7 @@ from .handlers import Handlers
 from .keys import KeyPair
 from .skill import SkillBridge
 
-ROOT = Path(__file__).resolve().parent.parent
-ENV_FILE = ROOT / ".env"
+from . import paths
 
 
 def step(n: int, total: int, title: str) -> None:
@@ -52,8 +51,8 @@ def find_bundle(arg: str | None) -> Path:
 
 def read_env() -> dict:
     env = {}
-    if ENV_FILE.exists():
-        for line in ENV_FILE.read_text().splitlines():
+    if paths.ENV_FILE.exists():
+        for line in paths.ENV_FILE.read_text().splitlines():
             if "=" in line and not line.lstrip().startswith("#"):
                 k, v = line.split("=", 1)
                 env[k.strip()] = v.strip()
@@ -61,7 +60,8 @@ def read_env() -> dict:
 
 
 def write_env(values: dict) -> None:
-    fd = os.open(ENV_FILE, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    paths.ENV_FILE.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    fd = os.open(paths.ENV_FILE, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, "w") as f:
         for k in ("SSH_MANAGER_URL", "CF_ACCESS_CLIENT_ID", "CF_ACCESS_CLIENT_SECRET"):
             f.write(f"{k}={values.get(k, '')}\n")
@@ -70,7 +70,7 @@ def write_env(values: dict) -> None:
 def run_setup(bundle_arg: str | None, key_path: Path, skill_dir: Path, agent_name: str, install_launchd) -> None:
     total = 6
     print("SSH Manager 新电脑设置向导")
-    print("会用到：网页「新电脑」里下载的 ssh-manager-setup.json，以及你设置的主密码。")
+    print("会用到：你设置的主密码。")
 
     # 1. 前置检查
     step(1, total, "检查本机环境")
@@ -83,14 +83,20 @@ def run_setup(bundle_arg: str | None, key_path: Path, skill_dir: Path, agent_nam
         fail("没有找到 ssh 命令", "安装 OpenSSH 客户端")
     ok("OpenSSH 客户端")
 
-    # 2. 读取设置文件
-    step(2, total, "读取设置文件")
-    bundle_path = find_bundle(bundle_arg)
+    # 2. 获取设置（配对链接，或网页下载的设置文件）
+    step(2, total, "获取云端设置")
     try:
-        bundle = json.loads(bundle_path.read_text())
+        if bundle_arg and bundle_arg.startswith("https://"):
+            r = httpx.get(bundle_arg, timeout=30)
+            if r.status_code != 200:
+                detail = r.json().get("detail", r.text[:200]) if r.headers.get("content-type", "").startswith("application/json") else r.text[:200]
+                fail(f"配对失败：{detail}", "在网页「新电脑」里重新生成安装命令（配对码 10 分钟内有效，只能用一次）")
+            bundle = r.json()
+        else:
+            bundle = json.loads(find_bundle(bundle_arg).read_text())
         url, backup = bundle["url"].rstrip("/"), bundle["backup"]
-    except (OSError, ValueError, KeyError) as e:
-        fail(f"无法读取设置文件：{e}", "在网页上点「新电脑」重新下载")
+    except (OSError, ValueError, KeyError, httpx.HTTPError) as e:
+        fail(f"无法读取云端设置：{e}", "在网页「新电脑」里重新生成安装命令")
     if not backup.get("has_env"):
         fail("这个备份只包含 agent 私钥，不含连接凭证（旧版备份）",
              "在旧电脑上运行 ./setup.sh backup 更新备份后，重新下载设置文件")
@@ -122,12 +128,12 @@ def run_setup(bundle_arg: str | None, key_path: Path, skill_dir: Path, agent_nam
         ok(f"已写入 {key_path}（权限 600）")
     old = read_env()
     differs = any(old.get(k) and old.get(k) != env.get(k) for k in ("SSH_MANAGER_URL", "CF_ACCESS_CLIENT_ID", "CF_ACCESS_CLIENT_SECRET"))
-    if differs and not ask_yes(f"{ENV_FILE} 已存在且内容不同，覆盖？", default=False):
+    if differs and not ask_yes(f"{paths.ENV_FILE} 已存在且内容不同，覆盖？", default=False):
         print("  保留原有 .env")
         env = {**env, **{k: v for k, v in old.items() if v}}
     else:
         write_env(env)
-        ok(f"已写入 {ENV_FILE}（权限 600）")
+        ok(f"已写入 {paths.ENV_FILE}（权限 600）")
     os.environ.update(env)
 
     # 5. 连接云端并同步服务器

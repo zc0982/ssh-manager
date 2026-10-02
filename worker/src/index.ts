@@ -170,6 +170,19 @@ async function userApi(req: Request, sql: Sql, me: string, path: string[]): Prom
 		});
 	}
 
+	if (a === "pairing" && m === "POST") {
+		const [backup] = await sql`select value->>'has_env' as has_env from settings where key = 'agent_key_backup'`;
+		if (backup?.has_env !== "true") throw new HttpError(409, "云端备份缺失或是旧格式，请先在已在用的电脑上运行 ./setup.sh backup");
+		await sql`delete from pairing_codes where expires_at < now() - interval '1 day'`;
+		const code = newPairCode();
+		const [row] = await sql`
+			insert into pairing_codes (code_hash, created_by, expires_at)
+			values (${await sha256Hex(code)}, ${me}, now() + make_interval(mins => ${PAIR_TTL_MIN}))
+			returning expires_at`;
+		const origin = new URL(req.url).origin;
+		return json({ command: `curl -fsSL ${origin}/pair/${code}/install.sh | bash`, expires_at: row.expires_at }, 201);
+	}
+
 	if (a === "setup-bundle" && m === "GET") {
 		// 新电脑设置文件：服务地址 + 用主密码加密的备份（只能在本机用主密码解开）
 		const [row] = await sql`select value from settings where key = 'agent_key_backup'`;
@@ -491,11 +504,83 @@ async function agentApi(req: Request, sql: Sql, path: string[]): Promise<Respons
 	throw new HttpError(404, "Not Found");
 }
 
+// ---------- 新电脑配对（一次性配对码，无需登录；由配对码本身授权） ----------
+
+const PAIR_TTL_MIN = 10;
+const PAIR_RE = /^[A-Za-z0-9_-]{43}$/;
+
+async function sha256Hex(text: string) {
+	const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text));
+	return [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+function newPairCode() {
+	const bytes = crypto.getRandomValues(new Uint8Array(32));
+	return btoa(String.fromCharCode(...bytes)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+const installScript = (base: string) => `#!/usr/bin/env bash
+# SSH Manager 新电脑安装：下载单文件 agent，输入主密码后把云端连接信息同步到本机
+set -euo pipefail
+BASE="${base}"
+DIR="$HOME/.ssh-manager"
+echo "SSH Manager：安装本机 agent 到 $DIR"
+if ! command -v uv >/dev/null 2>&1; then
+  echo "需要先安装 uv：curl -LsSf https://astral.sh/uv/install.sh | sh"
+  echo "装好后重新打开终端，10 分钟内再运行一次同样的命令即可。"
+  exit 1
+fi
+mkdir -p "$DIR" && chmod 700 "$DIR"
+curl -fsSL "$BASE/agent.pyz" -o "$DIR/ssh-manager-agent.pyz.tmp"
+mv "$DIR/ssh-manager-agent.pyz.tmp" "$DIR/ssh-manager-agent.pyz"
+exec uv run --no-project --python 3.12 --with httpx --with cryptography --with python-dotenv \\
+  python "$DIR/ssh-manager-agent.pyz" setup "$BASE/bundle" </dev/tty
+`;
+
+async function pairRoute(req: Request, env: Env, sql: Sql, code: string, file: string): Promise<Response> {
+	const text = (body: string, status = 200, type = "text/plain; charset=utf-8") =>
+		new Response(body, { status, headers: { "content-type": type, "cache-control": "no-store" } });
+	if (!PAIR_RE.test(code)) return text("配对码无效\n", 404);
+	const hash = await sha256Hex(code);
+
+	if (file === "bundle") {
+		// 原子地占用：只能成功一次
+		const [row] = await sql`
+			update pairing_codes set used_at = now()
+			where code_hash = ${hash} and used_at is null and expires_at > now()
+			returning code_hash`;
+		if (!row) return json({ detail: "配对码无效、已过期或已使用" }, 410);
+		const [backup] = await sql`select value from settings where key = 'agent_key_backup'`;
+		if (!backup) return json({ detail: "云端还没有备份，请先在旧电脑上运行 ./setup.sh backup" }, 409);
+		return json({ kind: "ssh-manager-setup", url: new URL(req.url).origin, backup: backup.value });
+	}
+
+	const [row] = await sql`select 1 from pairing_codes where code_hash = ${hash} and used_at is null and expires_at > now()`;
+	if (!row) return text("echo '配对码无效、已过期或已使用，请在网页「新电脑」里重新生成安装命令'; exit 1\n", 410);
+
+	if (file === "install.sh") return text(installScript(`${new URL(req.url).origin}/pair/${code}`), 200, "text/x-shellscript; charset=utf-8");
+	if (file === "agent.pyz") {
+		const asset = await env.ASSETS.fetch(new Request(new URL("/ssh-manager-agent.pyz", req.url)));
+		if (!asset.ok || (asset.headers.get("content-type") ?? "").includes("text/html")) return text("agent 文件缺失\n", 500);
+		return new Response(asset.body, { headers: { "content-type": "application/zip", "cache-control": "no-store" } });
+	}
+	return text("Not Found\n", 404);
+}
+
 // ---------- 入口 ----------
 
 export default {
 	async fetch(req: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
 		const url = new URL(req.url);
+		const pair = url.pathname.match(/^\/pair\/([^/]+)\/(install\.sh|agent\.pyz|bundle)$/);
+		if (pair) {
+			const sql = postgres(env.HYPERDRIVE.connectionString, { max: 2, prepare: true });
+			try {
+				return await pairRoute(req, env, sql, pair[1], pair[2]);
+			} finally {
+				ctx.waitUntil(sql.end());
+			}
+		}
 		if (!url.pathname.startsWith("/api/")) return env.ASSETS.fetch(req);
 
 		const who: Identity | null = await authenticate(req, env);

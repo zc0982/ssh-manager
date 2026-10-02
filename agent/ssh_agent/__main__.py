@@ -28,8 +28,9 @@ from .keys import KeyPair
 from .skill import SkillBridge
 
 VERSION = "0.2.0"
-ROOT = Path(__file__).resolve().parent.parent
-load_dotenv(ROOT / ".env")
+from .paths import CONFIG_DIR, ENV_FILE, run_command
+
+load_dotenv(ENV_FILE)
 log = logging.getLogger("ssh_agent")
 
 
@@ -50,7 +51,7 @@ def make_client() -> httpx.Client:
     url = setting("SSH_MANAGER_URL").rstrip("/")
     cid, secret = setting("CF_ACCESS_CLIENT_ID"), setting("CF_ACCESS_CLIENT_SECRET")
     if not url or not cid or not secret:
-        sys.exit("请在 agent/.env 中配置 SSH_MANAGER_URL、CF_ACCESS_CLIENT_ID、CF_ACCESS_CLIENT_SECRET")
+        sys.exit(f"请在 {ENV_FILE} 中配置 SSH_MANAGER_URL、CF_ACCESS_CLIENT_ID、CF_ACCESS_CLIENT_SECRET（新电脑请用网页「新电脑」里的安装命令）")
     return httpx.Client(base_url=url, timeout=httpx.Timeout(10, read=60),
                         headers={"CF-Access-Client-Id": cid, "CF-Access-Client-Secret": secret,
                                  "User-Agent": f"ssh-manager-agent/{VERSION}"})
@@ -122,8 +123,8 @@ PLIST = """<?xml version="1.0" encoding="UTF-8"?>
 <dict>
   <key>Label</key><string>{label}</string>
   <key>ProgramArguments</key>
-  <array><string>{uv}</string><string>run</string><string>--project</string><string>{root}</string><string>python</string><string>-m</string><string>ssh_agent</string><string>run</string></array>
-  <key>WorkingDirectory</key><string>{root}</string>
+  <array>{args}</array>
+  <key>WorkingDirectory</key><string>{workdir}</string>
   <key>EnvironmentVariables</key><dict><key>PATH</key><string>{path}</string></dict>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
@@ -144,7 +145,11 @@ def install_launchd() -> None:
     logdir = Path.home() / "Library" / "Logs" / "ssh-manager"
     logdir.mkdir(parents=True, exist_ok=True)
     plist = Path.home() / "Library" / "LaunchAgents" / f"{label}.plist"
-    plist.write_text(PLIST.format(label=label, uv=uv, root=ROOT, logdir=logdir, path=os.environ.get("PATH", "")))
+    from xml.sax.saxutils import escape
+    args = "".join(f"<string>{escape(a)}</string>" for a in run_command(uv, "run"))
+    plist.parent.mkdir(parents=True, exist_ok=True)
+    plist.write_text(PLIST.format(label=label, args=args, workdir=escape(str(CONFIG_DIR)), logdir=logdir,
+                                  path=escape(os.environ.get("PATH", ""))))
     uid = os.getuid()
     subprocess.run(["launchctl", "bootout", f"gui/{uid}/{label}"], capture_output=True)
     subprocess.run(["launchctl", "bootstrap", f"gui/{uid}", str(plist)], check=True)
@@ -187,7 +192,7 @@ def main() -> None:
     logging.getLogger("httpx").setLevel(logging.WARNING)
     p = argparse.ArgumentParser(prog="ssh_agent")
     p.add_argument("command", choices=["run", "install-launchd", "pubkey", "backup-key", "restore-key", "setup"])
-    p.add_argument("file", nargs="?", help="setup：网页下载的 ssh-manager-setup.json")
+    p.add_argument("file", nargs="?", help="setup：配对链接（网页「新电脑」生成）或下载的 ssh-manager-setup.json")
     args = p.parse_args()
     if args.command == "run":
         run()
