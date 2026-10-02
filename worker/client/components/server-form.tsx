@@ -5,17 +5,18 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { api, type Job, type Server, type SshKey, waitJob } from "@/lib/api";
+import { api, type Environment, type Job, type Server, type SshKey, waitJob } from "@/lib/api";
+import { EnvSelectItems } from "./environments-dialog";
 import { encryptPassword } from "@/lib/crypto";
 
 const LOCAL = "__local__";
-const ENVS = ["development", "staging", "production"];
 
 type Props = {
 	open: boolean;
 	onOpenChange: (open: boolean) => void;
 	server: Server | null; // null = 新增
 	keys: SshKey[];
+	envs: Environment[];
 	publicKey: JsonWebKey | null;
 	onSaved: (server: Server) => void;
 };
@@ -26,7 +27,7 @@ const empty = {
 	tags: "", location: "", description: "",
 };
 
-export function ServerForm({ open, onOpenChange, server, keys, publicKey, onSaved }: Props) {
+export function ServerForm({ open, onOpenChange, server, keys, envs, publicKey, onSaved }: Props) {
 	const [f, setF] = useState(empty);
 	const [error, setError] = useState("");
 	const [saving, setSaving] = useState(false);
@@ -41,8 +42,8 @@ export function ServerForm({ open, onOpenChange, server, keys, publicKey, onSave
 				password: "", proxy_jump: server.proxy_jump ?? "", environment: server.environment,
 				tags: server.tags.join(", "), location: server.location, description: server.description,
 			}
-			: empty);
-	}, [open, server]);
+			: { ...empty, environment: envs[0]?.name ?? "development" });
+	}, [open, server, envs]);
 
 	const set = (k: keyof typeof empty) => (e: React.ChangeEvent<HTMLInputElement>) => setF({ ...f, [k]: e.target.value });
 
@@ -91,10 +92,10 @@ export function ServerForm({ open, onOpenChange, server, keys, publicKey, onSave
 					</DialogHeader>
 					<div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
 						<Field label="别名"><Input required pattern="[A-Za-z0-9._\-]+" placeholder="prod-web-01" value={f.alias} onChange={set("alias")} /></Field>
-						<Field label="环境">
+						<Field label="分组（环境）">
 							<Select value={f.environment} onValueChange={(v) => setF({ ...f, environment: v })}>
 								<SelectTrigger className="w-full"><SelectValue /></SelectTrigger>
-								<SelectContent>{ENVS.map((e) => <SelectItem key={e} value={e}>{e}</SelectItem>)}</SelectContent>
+								<SelectContent><EnvSelectItems envs={envs} /></SelectContent>
 							</Select>
 						</Field>
 						<Field label="主机"><Input required placeholder="192.168.1.10" value={f.hostname} onChange={set("hostname")} /></Field>

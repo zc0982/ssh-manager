@@ -13,7 +13,8 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { api, fmtTime, type Job, type JobResult, runJob, type Server, type SshKey } from "@/lib/api";
+import { api, type Environment, fmtTime, type Job, type JobResult, runJob, type Server, type SshKey } from "@/lib/api";
+import { EnvBadge } from "./environments-dialog";
 import { cn } from "@/lib/utils";
 import { Field } from "./server-form";
 
@@ -23,8 +24,8 @@ type Line = { kind: "cmd" | "out" | "err" | "info"; text: string };
 const termStore = new Map<string, Line[]>();
 const history: string[] = [];
 
-export function ServerDetail({ server, keys, onEdit, onChanged, onDeleted }: {
-	server: Server; keys: SshKey[]; onEdit: () => void; onChanged: () => void; onDeleted: () => void;
+export function ServerDetail({ server, keys, envs, onEdit, onChanged, onDeleted }: {
+	server: Server; keys: SshKey[]; envs: Environment[]; onEdit: () => void; onChanged: () => void; onDeleted: () => void;
 }) {
 	const [lines, setLines] = useState<Line[]>(() => termStore.get(server.id) ?? []);
 	const [testing, setTesting] = useState(false);
@@ -81,7 +82,7 @@ export function ServerDetail({ server, keys, onEdit, onChanged, onDeleted }: {
 				<div className="min-w-0">
 					<div className="flex flex-wrap items-center gap-2">
 						<h1 className="text-xl font-semibold tracking-wide">{server.alias}</h1>
-						<EnvBadge env={server.environment} />
+						<EnvBadge env={server.environment} envs={envs} />
 						{notSynced && <Badge variant="outline" className="border-amber-500 text-amber-600">待同步到本机</Badge>}
 					</div>
 					<p className="mt-1 font-mono text-sm text-muted-foreground">
@@ -142,12 +143,6 @@ export function ServerDetail({ server, keys, onEdit, onChanged, onDeleted }: {
 			</Tabs>
 		</div>
 	);
-}
-
-export function EnvBadge({ env }: { env: string }) {
-	const cls = env === "production" ? "border-red-500/50 text-red-600 dark:text-red-400"
-		: env === "staging" ? "border-amber-500/50 text-amber-600 dark:text-amber-400" : "";
-	return <Badge variant="outline" className={cls}>{env}</Badge>;
 }
 
 function Fact({ label, className, children }: { label: string; className?: string; children: React.ReactNode }) {

@@ -1,4 +1,4 @@
-import { DownloadCloudIcon, KeyRoundIcon, LaptopIcon, PlusIcon, RefreshCwIcon, SearchIcon, ServerIcon, TerminalSquareIcon, TriangleAlertIcon } from "lucide-react";
+import { ChevronRightIcon, DownloadCloudIcon, FolderTreeIcon, KeyRoundIcon, LaptopIcon, PlusIcon, RefreshCwIcon, SearchIcon, ServerIcon, TerminalSquareIcon, TriangleAlertIcon } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
 import { Alert, AlertDescription } from "@/components/ui/alert";
@@ -8,9 +8,10 @@ import { Input } from "@/components/ui/input";
 import { Toaster } from "@/components/ui/sonner";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { ImportDialog, KeysDialog, NewPcDialog } from "@/components/dialogs";
-import { EnvBadge, ServerDetail } from "@/components/server-detail";
+import { ColorDot, EnvBadge, EnvironmentsDialog } from "@/components/environments-dialog";
+import { ServerDetail } from "@/components/server-detail";
 import { ServerForm } from "@/components/server-form";
-import { api, fmtTime, runJob, type Server, type SshKey, type Status } from "@/lib/api";
+import { api, type Environment, fmtTime, runJob, type Server, type SshKey, type Status } from "@/lib/api";
 import { cn } from "@/lib/utils";
 
 export default function App() {
@@ -18,9 +19,13 @@ export default function App() {
 	const [status, setStatus] = useState<Status | null>(null);
 	const [servers, setServers] = useState<Server[]>([]);
 	const [keys, setKeys] = useState<SshKey[]>([]);
+	const [envs, setEnvs] = useState<Environment[]>([]);
+	const [envsOpen, setEnvsOpen] = useState(false);
+	const [collapsed, setCollapsed] = useState<Set<string>>(() => {
+		try { return new Set(JSON.parse(localStorage.getItem("ssh-manager:collapsed") || "[]")); } catch { return new Set(); }
+	});
 	const [selectedId, setSelectedId] = useState<string | null>(null);
 	const [query, setQuery] = useState("");
-	const [env, setEnv] = useState("all");
 	const [formOpen, setFormOpen] = useState(false);
 	const [editing, setEditing] = useState<Server | null>(null);
 	const [keysOpen, setKeysOpen] = useState(false);
@@ -32,6 +37,7 @@ export default function App() {
 	const loadStatus = useCallback(() => api<Status>("/api/status").then(setStatus), []);
 	const loadServers = useCallback(() => api<Server[]>("/api/servers").then(setServers), []);
 	const loadKeys = useCallback(() => api<SshKey[]>("/api/keys").then(setKeys), []);
+	const loadEnvs = useCallback(() => api<Environment[]>("/api/environments").then(setEnvs), []);
 
 	useEffect(() => {
 		const fail = (e: Error) => toast.error(e.message);
@@ -39,18 +45,32 @@ export default function App() {
 		loadStatus().catch(fail);
 		loadServers().catch(fail);
 		loadKeys().catch(fail);
+		loadEnvs().catch(fail);
 		const t = setInterval(() => loadStatus().catch(() => {}), 30_000);
 		return () => clearInterval(t);
-	}, [loadStatus, loadServers, loadKeys]);
+	}, [loadStatus, loadServers, loadKeys, loadEnvs]);
+
+	const toggleGroup = (id: string) => {
+		const next = new Set(collapsed);
+		if (next.has(id)) next.delete(id); else next.add(id);
+		setCollapsed(next);
+		try { localStorage.setItem("ssh-manager:collapsed", JSON.stringify([...next])); } catch { /* 隐私模式等情况下忽略 */ }
+	};
 
 	const selected = servers.find((s) => s.id === selectedId) ?? null;
-	const envs = useMemo(() => ["all", ...new Set(servers.map((s) => s.environment))], [servers]);
 	const visible = servers.filter((s) => {
-		if (env !== "all" && s.environment !== env) return false;
 		const q = query.trim().toLowerCase();
 		return !q || [s.alias, s.hostname, s.description, s.location, ...s.tags].join(" ").toLowerCase().includes(q);
 	});
 	const online = status?.agents.some((a) => a.online) ?? false;
+	const sections = useMemo(() => {
+		const list = envs.map((e) => ({ id: e.name, name: e.name, color: e.color, servers: visible.filter((s) => s.environment === e.name) }));
+		const known = new Set(envs.map((e) => e.name));
+		const orphan = visible.filter((s) => !known.has(s.environment)); // 理论上不会出现（有外键）
+		if (orphan.length) list.push({ id: "__other__", name: "其他", color: "gray", servers: orphan });
+		// 搜索时隐藏空分组
+		return list.filter((sec) => sec.servers.length || !query);
+	}, [envs, visible, query]);
 
 	async function pullAll() {
 		setPulling(true);
@@ -100,6 +120,7 @@ export default function App() {
 				</div>
 				<div className="flex flex-wrap gap-1.5">
 					<Button variant="ghost" size="sm" onClick={() => setNewPcOpen(true)}><LaptopIcon />新电脑</Button>
+					<Button variant="ghost" size="sm" onClick={() => { loadEnvs(); setEnvsOpen(true); }}><FolderTreeIcon />分组</Button>
 					<Button variant="ghost" size="sm" onClick={() => { loadKeys(); setKeysOpen(true); }}><KeyRoundIcon />密钥</Button>
 					<Button variant="ghost" size="sm" disabled={loadingImport} onClick={openImport}><DownloadCloudIcon />从本机导入</Button>
 					<Button variant="ghost" size="sm" disabled={pulling} onClick={pullAll}><RefreshCwIcon className={cn(pulling && "animate-spin")} />全部同步到本机</Button>
@@ -132,31 +153,31 @@ export default function App() {
 						<SearchIcon className="pointer-events-none absolute top-1/2 left-2.5 size-4 -translate-y-1/2 text-muted-foreground" />
 						<Input className="pl-8" placeholder="搜索别名 / 主机 / 标签 / 备注" value={query} onChange={(e) => setQuery(e.target.value)} />
 					</div>
-					<div className="flex flex-wrap gap-1">
-						{envs.map((e) => (
-							<Button key={e} size="xs" variant={e === env ? "default" : "outline"} onClick={() => setEnv(e)}>{e === "all" ? "全部" : e}</Button>
-						))}
-					</div>
 					<div className="-mx-1 min-h-0 flex-1 overflow-x-hidden overflow-y-auto px-1">
-						<ul className="flex flex-col gap-0.5">
-							{visible.map((s) => (
-								<li key={s.id} className="min-w-0">
-									<button
-										type="button"
-										onClick={() => setSelectedId(s.id)}
-										className={cn("w-full rounded-md px-2.5 py-2 text-left transition-colors hover:bg-muted", s.id === selectedId && "bg-muted")}
-									>
-										<div className="flex items-center gap-2 font-medium">
-											<span className={cn("size-2 shrink-0 rounded-full", s.last_status === "ok" ? "bg-emerald-500" : s.last_status === "error" ? "bg-red-500" : "bg-zinc-300 dark:bg-zinc-600")} />
-											<span className="min-w-0 flex-1 truncate">{s.alias}</span>
-											<span className="shrink-0"><EnvBadge env={s.environment} /></span>
-										</div>
-										<div className="truncate pl-4 font-mono text-xs text-muted-foreground">{s.username}@{s.hostname}:{s.port}</div>
-									</button>
-								</li>
-							))}
-							{!visible.length && <li className="px-2 py-6 text-center text-sm text-muted-foreground">暂无服务器</li>}
-						</ul>
+						{envs.length === 0 ? (
+							<ServerList servers={visible} envs={envs} selectedId={selectedId} onSelect={setSelectedId} />
+						) : (
+							<div className="flex flex-col gap-1">
+								{sections.map((sec) => {
+									const open = !collapsed.has(sec.id) || !!query;
+									return (
+										<section key={sec.id}>
+											<button type="button" onClick={() => toggleGroup(sec.id)}
+												className="flex w-full items-center gap-1.5 rounded-md px-1.5 py-1 font-mono text-xs font-medium text-muted-foreground hover:text-foreground">
+												<ChevronRightIcon className={cn("size-3.5 transition-transform", open && "rotate-90")} />
+												<ColorDot color={sec.color} className="size-2" />
+												<span className="min-w-0 flex-1 truncate text-left">{sec.name}</span>
+												<span className="tabular-nums">{sec.servers.length}</span>
+											</button>
+											{open && (sec.servers.length
+												? <ServerList servers={sec.servers} envs={envs} selectedId={selectedId} onSelect={setSelectedId} />
+												: <p className="py-1.5 pl-7 text-xs text-muted-foreground">空分组</p>)}
+										</section>
+									);
+								})}
+							</div>
+						)}
+						{!visible.length && <p className="px-2 py-6 text-center text-sm text-muted-foreground">暂无服务器</p>}
 					</div>
 				</aside>
 
@@ -166,9 +187,10 @@ export default function App() {
 							key={selected.id}
 							server={selected}
 							keys={keys}
+							envs={envs}
 							onEdit={() => { setEditing(selected); setFormOpen(true); }}
 							onChanged={() => loadServers()}
-							onDeleted={() => { setSelectedId(null); loadServers(); loadKeys(); }}
+							onDeleted={() => { setSelectedId(null); loadServers(); loadKeys(); loadEnvs(); }}
 						/>
 					) : (
 						<div className="flex h-full flex-col items-center justify-center gap-3 text-muted-foreground">
@@ -185,8 +207,9 @@ export default function App() {
 				onOpenChange={setFormOpen}
 				server={editing}
 				keys={keys}
+				envs={envs}
 				publicKey={status?.public_key ?? null}
-				onSaved={(s) => { setSelectedId(s.id); loadServers(); loadKeys(); }}
+				onSaved={(s) => { setSelectedId(s.id); loadServers(); loadKeys(); loadEnvs(); }}
 			/>
 			<KeysDialog open={keysOpen} onOpenChange={setKeysOpen} keys={keys} publicKey={status?.public_key ?? null} onChanged={loadKeys} />
 			<ImportDialog
@@ -195,7 +218,31 @@ export default function App() {
 				hosts={importHosts ?? []}
 				onDone={() => { loadServers(); loadKeys(); }}
 			/>
+			<EnvironmentsDialog open={envsOpen} onOpenChange={setEnvsOpen} envs={envs} onChanged={() => { loadEnvs(); loadServers(); }} />
 			<NewPcDialog open={newPcOpen} onOpenChange={setNewPcOpen} status={status} />
 		</div>
+	);
+}
+
+function ServerList({ servers, envs, selectedId, onSelect }: { servers: Server[]; envs: Environment[]; selectedId: string | null; onSelect: (id: string) => void }) {
+	return (
+		<ul className="flex flex-col gap-0.5">
+			{servers.map((s) => (
+				<li key={s.id} className="min-w-0">
+					<button
+						type="button"
+						onClick={() => onSelect(s.id)}
+						className={cn("w-full rounded-md px-2.5 py-2 text-left transition-colors hover:bg-muted", s.id === selectedId && "bg-muted")}
+					>
+						<div className="flex items-center gap-2 font-medium">
+							<span className={cn("size-2 shrink-0 rounded-full", s.last_status === "ok" ? "bg-emerald-500" : s.last_status === "error" ? "bg-red-500" : "bg-zinc-300 dark:bg-zinc-600")} />
+							<span className="min-w-0 flex-1 truncate">{s.alias}</span>
+							<span className="shrink-0"><EnvBadge env={s.environment} envs={envs} /></span>
+						</div>
+						<div className="truncate pl-4 font-mono text-xs text-muted-foreground">{s.username}@{s.hostname}:{s.port}</div>
+					</button>
+				</li>
+			))}
+		</ul>
 	);
 }

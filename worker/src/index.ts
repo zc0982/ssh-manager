@@ -15,6 +15,8 @@ const TAG_RE = /^[^\s,-][^\s,]*$/;
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const SEALED_RE = /^v1\.[A-Za-z0-9+/=]+\.[A-Za-z0-9+/=]+\.[A-Za-z0-9+/=]+$/;
 const MAX_SEALED = 120_000;
+const ENV_RE = /^[A-Za-z0-9._-]{1,32}$/;
+const ENV_COLORS = new Set(["magenta", "cyan", "yellow", "purple", "green", "orange", "blue", "gray"]);
 const MAX_RESULT_TEXT = 100_000;
 const AGENT_ONLINE_MS = 60_000;
 const POLL_WAIT_MS = 20_000;
@@ -68,11 +70,29 @@ function parseServer(b: any) {
 		identity_file: auth_type === "key" && !key_id ? str(b.identity_file, "密钥文件", { max: 1024 }) : null,
 		key_id,
 		proxy_jump: str(b.proxy_jump, "跳板机", { re: ALIAS_RE, max: 64 }),
-		environment: str(b.environment, "环境", { re: TOKEN_RE, max: 32 }) ?? "development",
+		environment: str(b.environment, "环境", { re: ENV_RE, max: 32 }) ?? "development",
 		tags,
 		location: str(b.location, "位置") ?? "",
 		description: str(b.description, "备注", { max: 1000 }) ?? "",
 	};
+}
+
+async function assertEnv(sql: Sql, name: string) {
+	const [e] = await sql`select 1 from environments where name = ${name}`;
+	if (!e) throw new HttpError(422, `环境 ${name} 不存在，请先在「分组」里创建`);
+}
+
+function parseEnv(b: any) {
+	const name = str(typeof b?.name === "string" ? b.name.trim() : b?.name, "环境名称", { required: true, re: ENV_RE, max: 32 })!;
+	const color = ENV_COLORS.has(b?.color) ? b.color : "magenta";
+	return { name, color, description: str(b?.description, "说明", { max: 200 }) ?? "" };
+}
+
+/** 环境改名/迁移后，让受影响服务器的 ~/.ssh/config 也更新 */
+async function resyncEnv(sql: Sql, who: string, env: string) {
+	const rows = await sql`select id, alias from servers where environment = ${env}`;
+	for (const r of rows) await enqueue(sql, who, "sync", r);
+	return rows.length;
 }
 
 async function assertKey(sql: Sql, keyId: string | null) {
@@ -163,6 +183,62 @@ async function userApi(req: Request, sql: Sql, me: string, path: string[]): Prom
 		});
 	}
 
+	if (a === "environments") {
+		if (!b && m === "GET") {
+			return json(await sql`
+				select e.*, (select count(*)::int from servers s where s.environment = e.name) as server_count
+				from environments e order by e.sort_order, e.name`);
+		}
+		if (!b && m === "POST") {
+			const e = parseEnv(await body(req));
+			const dup = await sql`select 1 from environments where name = ${e.name}`;
+			if (dup.length) throw new HttpError(409, `环境 ${e.name} 已存在`);
+			const [row] = await sql`
+				insert into environments (name, color, description, sort_order)
+				values (${e.name}, ${e.color}, ${e.description}, (select coalesce(max(sort_order), 0) + 1 from environments))
+				returning *`;
+			return json({ ...row, server_count: 0 }, 201);
+		}
+		if (b === "_order" && m === "PUT") {
+			const { names } = await body(req);
+			if (!Array.isArray(names) || names.some((x) => typeof x !== "string" || !ENV_RE.test(x))) throw new HttpError(422, "names 格式不正确");
+			await sql.begin(async (tx: any) => {
+				for (const [i, name] of names.entries()) await tx`update environments set sort_order = ${i + 1} where name = ${name}`;
+			});
+			return json({ ok: true });
+		}
+		if (b && !c) {
+			const name = decodeURIComponent(b);
+			const [existing] = await sql`select * from environments where name = ${name}`;
+			if (!existing) throw new HttpError(404, "环境不存在");
+			if (m === "PUT") {
+				const e = parseEnv(await body(req));
+				if (e.name !== name) {
+					const dup = await sql`select 1 from environments where name = ${e.name}`;
+					if (dup.length) throw new HttpError(409, `环境 ${e.name} 已存在`);
+				}
+				// 外键 on update cascade：改名会同步更新所有服务器的 environment
+				const [row] = await sql`update environments set ${sql(e as any)} where name = ${name} returning *`;
+				const synced = e.name !== name ? await resyncEnv(sql, me, e.name) : 0;
+				return json({ ...row, synced });
+			}
+			if (m === "DELETE") {
+				const moveTo = new URL(req.url).searchParams.get("move_to");
+				const [{ n }] = await sql`select count(*)::int as n from servers where environment = ${name}`;
+				let moved: any[] = [];
+				if (n > 0) {
+					if (!moveTo) throw new HttpError(409, `还有 ${n} 台服务器使用该环境，请选择要迁移到的环境`);
+					if (moveTo === name) throw new HttpError(422, "不能迁移到自身");
+					await assertEnv(sql, moveTo);
+					moved = await sql`update servers set environment = ${moveTo} where environment = ${name} returning id, alias`;
+				}
+				await sql`delete from environments where name = ${name}`;
+				for (const r of moved) await enqueue(sql, me, "sync", r);
+				return json({ deleted: true, moved: moved.length });
+			}
+		}
+	}
+
 	if (a === "keys") {
 		if (!b && m === "GET") {
 			return json(await sql`
@@ -194,6 +270,7 @@ async function userApi(req: Request, sql: Sql, me: string, path: string[]): Prom
 			const enc = s.auth_type === "password" ? str(input.password_encrypted, "密码密文", { max: 2048 }) : null;
 			if (s.auth_type === "password" && !enc) throw new HttpError(422, "密码认证需要填写密码");
 			await assertKey(sql, s.key_id);
+			await assertEnv(sql, s.environment);
 			const exists = await sql`select 1 from servers where alias = ${s.alias}`;
 			if (exists.length) throw new HttpError(409, `别名 ${s.alias} 已存在`);
 			const [row] = await sql`insert into servers ${sql({ ...s, password_encrypted: enc } as any)} returning *`;
@@ -211,6 +288,7 @@ async function userApi(req: Request, sql: Sql, me: string, path: string[]): Prom
 				const input = await body(req);
 				const s = parseServer(input);
 				await assertKey(sql, s.key_id);
+				await assertEnv(sql, s.environment);
 				let enc: string | null = existing.password_encrypted;
 				if (s.auth_type === "key" || input.clear_password) enc = null;
 				const newEnc = str(input.password_encrypted, "密码密文", { max: 2048 });
@@ -367,6 +445,10 @@ async function agentApi(req: Request, sql: Sql, path: string[]): Promise<Respons
 						raw.key_id = row.id;
 					}
 					const s = parseServer(raw);
+					// 本机配置里的环境值不在列表中时自动创建
+					await sql`insert into environments (name, color, sort_order)
+						values (${s.environment}, 'gray', (select coalesce(max(sort_order), 0) + 1 from environments))
+						on conflict (name) do nothing`;
 					const enc = s.auth_type === "password" ? str(raw.password_encrypted, "密码密文", { max: 2048 }) : null;
 					await sql`insert into servers ${sql({ ...s, password_encrypted: enc, last_synced_at: new Date() } as any)}`;
 					imported.push(s.alias);
