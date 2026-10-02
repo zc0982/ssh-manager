@@ -10,4 +10,3 @@ dist/
 .DS_Store
 .secrets.env
 public/background.*
-public/ssh-manager-agent.pyz

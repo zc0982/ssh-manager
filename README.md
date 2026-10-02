@@ -70,20 +70,20 @@ SSH 连接管理系统：服务器清单存在云端，网页托管在 Cloudflar
 
 ## 换电脑
 
-不需要下载源代码：
+不需要下载源代码，也不需要安装程序：
 
-1. 新电脑上装好 [uv](https://docs.astral.sh/uv/) 和 ssh-skill（`~/.claude/skills/ssh-skill`）。
-2. 网页上点「新电脑」→「生成安装命令」，得到一条带一次性配对码（10 分钟有效、只能用一次）的命令，粘贴到新电脑终端运行：
+1. 在新电脑的浏览器里登录网页，点「新电脑」，输入主密码。浏览器在本地解开 agent 私钥，再解密云端的服务器密码和 SSH 私钥，生成同步脚本。
+2. 点「复制同步脚本」，然后在终端输入：
 
    ```bash
-   curl -fsSL https://<你的域名>/pair/<配对码>/install.sh | bash
+   pbpaste | bash
    ```
 
-3. 按提示输入主密码。命令会把单文件 agent（`ssh-manager-agent.pyz`，由 `worker/scripts/build-agent.mjs` 在构建时打包）装到 `~/.ssh-manager/`，在本机解密后写入 agent 私钥与连接凭证、把所有服务器（含云端私钥）同步到 `~/.ssh/config`，并安装开机自启的后台服务。
+   脚本会备份原配置为 `~/.ssh/config.ssh-manager.bak`，用 ssh-skill 的格式把所有服务器写进 `~/.ssh/config`（同名条目先替换，其他配置不动），私钥写到 `~/.ssh/ssh-manager/`（600 权限），最后清空剪贴板。可以重复运行。
 
-`/pair/*` 需要在 Cloudflare Access 里单独设为 Bypass（由 Worker 校验配对码）；设置包本身仍是主密码加密的。
+为什么还要一条终端命令：浏览器的 File System Access API 明确禁止网页写入 `~/.ssh`。
 
-备用方式：下载 `ssh-manager-setup.json` 后用源代码里的 `./setup.sh` 运行向导。
+可选：如果还想让网页上的命令在新电脑上执行，就需要后台 agent。用源代码和下载的设置文件运行 `./setup.sh` 安装。
 
 `setup.sh` 的其他用法：`./setup.sh backup`（更新云端备份）、`./setup.sh service`（安装/重启后台服务）、`./setup.sh status`（查看后台服务状态和日志）。
 

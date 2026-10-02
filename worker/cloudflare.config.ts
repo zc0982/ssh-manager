@@ -10,7 +10,7 @@ export default defineConfig({
 		workersDev: true,
 		previewUrls: false,
 		entrypoint,
-		assets: { notFoundHandling: "single-page-application", runWorkerFirst: ["/api/*", "/pair/*"] },
+		assets: { notFoundHandling: "single-page-application", runWorkerFirst: ["/api/*"] },
 		env: {
 			ASSETS: bindings.assets(),
 			HYPERDRIVE: bindings.hyperdrive({
