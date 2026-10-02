@@ -6,6 +6,9 @@ export default defineConfig({
 		name: "ssh-manager",
 		compatibilityDate: "2026-09-30",
 		compatibilityFlags: ["nodejs_compat"],
+		// 只开放受 Access 保护的 ssh-manager.<子域>.workers.dev；关闭不受 Access 保护的版本预览地址
+		workersDev: true,
+		previewUrls: false,
 		entrypoint,
 		assets: { notFoundHandling: "single-page-application", runWorkerFirst: ["/api/*"] },
 		env: {
