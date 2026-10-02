@@ -13,7 +13,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { Textarea } from "@/components/ui/textarea";
 import { api, fmtTime, runJob, type SshKey, type Status } from "@/lib/api";
 import { sealData } from "@/lib/crypto";
-import { type Backup, buildSyncScript, type ExportKey, type ExportServer, type SyncResult, unlockAgentKey } from "@/lib/restore";
+import { type Backup, buildSyncScript, type ExportKey, type ExportServer, type SyncResult, unlockAgentKey, windowsOneLiner } from "@/lib/restore";
 import { Field } from "./server-form";
 
 type Open = { open: boolean; onOpenChange: (open: boolean) => void };
@@ -210,13 +210,14 @@ export function NewPcDialog({ open, onOpenChange, status }: Open & { status: Sta
 	const [busy, setBusy] = useState(false);
 	const [error, setError] = useState("");
 	const [result, setResult] = useState<SyncResult | null>(null);
+	const [winLine, setWinLine] = useState<string | null>(null); // Windows：可直接粘贴运行的单行命令
 	const [os, setOs] = useState(detectedOs);
 	const [unlocked, setUnlocked] = useState<{ priv: CryptoKey; servers: ExportServer[]; keys: ExportKey[] } | null>(null);
 	const [copied, setCopied] = useState(false);
 	const [showAgent, setShowAgent] = useState(false);
 
 	useEffect(() => {
-		if (!open) { setPassword(""); setResult(null); setUnlocked(null); setCopied(false); setError(""); setShowAgent(false); }
+		if (!open) { setPassword(""); setResult(null); setWinLine(null); setUnlocked(null); setCopied(false); setError(""); setShowAgent(false); }
 	}, [open]);
 
 	// 切换系统时用已解开的私钥重新生成脚本，不用再输密码
@@ -224,8 +225,13 @@ export function NewPcDialog({ open, onOpenChange, status }: Open & { status: Sta
 		if (!unlocked) return;
 		setCopied(false);
 		buildSyncScript(unlocked.priv, unlocked.servers, unlocked.keys, os === "windows" ? "windows" : "posix")
-			.then(setResult, (e) => setError(e.message));
+			.then(async (r) => {
+				setWinLine(os === "windows" ? await windowsOneLiner(r.script) : null);
+				setResult(r);
+			}, (e) => setError(e.message));
 	}, [unlocked, os]);
+
+	const pasteMode = os === "windows" && !!winLine;
 
 	async function prepare(e: React.FormEvent) {
 		e.preventDefault();
@@ -269,18 +275,26 @@ export function NewPcDialog({ open, onOpenChange, status }: Open & { status: Sta
 							</p>
 						)}
 					</Step>
-					<Step n={2} title="复制同步脚本">
-						<Button className="mt-2" disabled={!result} onClick={async () => setCopied(await copy(result!.script, "同步脚本已复制到剪贴板"))}>
-							<CopyIcon />{copied ? "已复制，可再次复制" : "复制同步脚本"}
+					<Step n={2} title={pasteMode ? "复制同步命令" : "复制同步脚本"}>
+						<Button className="mt-2" disabled={!result}
+							onClick={async () => setCopied(await copy(pasteMode ? winLine! : result!.script, pasteMode ? "同步命令已复制" : "同步脚本已复制到剪贴板"))}>
+							<CopyIcon />{copied ? "已复制，可再次复制" : pasteMode ? "复制同步命令" : "复制同步脚本"}
 						</Button>
 					</Step>
-					<Step n={3} title={os === "windows" ? "打开「命令提示符」(cmd) 或 PowerShell，输入（不要再复制别的内容）" : "在终端里输入（不要再复制别的内容）"}>
+					<Step n={3} title={pasteMode ? "打开「命令提示符」(cmd) 或 PowerShell，粘贴并回车" : os === "windows" ? "打开「命令提示符」(cmd) 或 PowerShell，输入下面的命令（不要直接粘贴脚本）" : "在终端里输入下面的命令（不要直接粘贴脚本）"}>
 						<div className="mt-2 flex flex-wrap gap-1">
 							{(["mac", "windows", "linux"] as const).map((o) => (
 								<Button key={o} size="xs" variant={os === o ? "default" : "outline"} onClick={() => setOs(o)}>{OS_LABEL[o]}</Button>
 							))}
 						</div>
-						<pre className="mt-2 w-fit max-w-full overflow-x-auto rounded-md bg-muted px-3 py-2 font-mono text-base text-foreground">{RUN_CMD[os]}</pre>
+						{pasteMode ? (
+							<p className="mt-2 text-foreground">在窗口里点右键或按 <kbd className="rounded border px-1">Ctrl</kbd>+<kbd className="rounded border px-1">V</kbd> 粘贴刚才复制的那一行，然后按回车。</p>
+						) : (
+							<>
+								{os === "windows" && result && !winLine && <p className="mt-2 text-amber-500">服务器较多，命令超过 cmd 单行长度限制，请改用下面的方式。</p>}
+								<pre className="mt-2 w-fit max-w-full overflow-x-auto rounded-md bg-muted px-3 py-2 font-mono text-base text-foreground">{RUN_CMD[os]}</pre>
+							</>
+						)}
 						<p className="mt-1">
 							{os === "windows"
 								? "写入 %USERPROFILE%\\.ssh\\config（原配置备份为 config.ssh-manager.bak），私钥写到 .ssh\\ssh-manager\\ 并设为仅当前用户可读，运行后自动清空剪贴板。"

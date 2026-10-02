@@ -78,7 +78,7 @@ SSH 连接管理系统：服务器清单存在云端，网页托管在 Cloudflar
    | 系统 | 命令 |
    |---|---|
    | macOS | `pbpaste \| bash` |
-   | Windows（cmd 或 PowerShell） | `powershell -nop -c "iex (Get-Clipboard -Raw)"` |
+   | Windows（cmd 或 PowerShell） | 复制的就是一行命令，直接粘贴并回车（服务器特别多、超过 cmd 单行长度时，改为输入 `powershell -nop -c "iex (Get-Clipboard -Raw)"`） |
    | Linux | `xclip -o -selection clipboard \| bash` |
 
    脚本会备份原配置为 `~/.ssh/config.ssh-manager.bak`，用 ssh-skill 的格式把所有服务器写进 `~/.ssh/config`（同名条目先替换，其他配置不动），私钥写到 `~/.ssh/ssh-manager/`（macOS/Linux 为 600 权限；Windows 用 icacls 设为仅当前用户可访问），最后清空剪贴板。可以重复运行。Windows 写入 `%USERPROFILE%\.ssh\config`，UTF-8 无 BOM。

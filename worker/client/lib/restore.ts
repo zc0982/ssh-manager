@@ -233,6 +233,14 @@ $text += "\`n"
 [IO.File]::WriteAllText($cfg, $text, $utf8)
 Protect-SshFile $cfg
 try { Set-Clipboard -Value $null } catch { try { Set-Clipboard -Value ' ' } catch { } }
+# 如果是在 PowerShell 里粘贴运行的，把这条含密文的命令从 PSReadLine 历史文件里删掉
+try {
+  $hp = Join-Path $env:APPDATA 'Microsoft\\Windows\\PowerShell\\PSReadLine\\ConsoleHost_history.txt'
+  if ($env:APPDATA -and (Test-Path $hp)) {
+    $keep = @(Get-Content $hp | Where-Object { $_ -notmatch 'GZipStream' })
+    Set-Content -Path $hp -Value $keep -Encoding UTF8
+  }
+} catch { }
 Write-Host "${doneMsg(p, "%USERPROFILE%\\.ssh")}"
 `;
 }
@@ -242,4 +250,22 @@ export async function buildSyncScript(priv: CryptoKey, servers: ExportServer[], 
 	const p = await prepare(priv, servers, keys);
 	const script = platform === "windows" ? renderWindows(p) : renderPosix(p);
 	return { script, servers: p.aliases.length, keyFiles: p.keys.size, skipped: p.skipped, platform };
+}
+
+/** cmd 单行命令上限 8191 字符，留一点余量 */
+const WINDOWS_MAX_LINE = 8000;
+
+async function gzipB64(text: string): Promise<string> {
+	const stream = new Blob([enc.encode(text)]).stream().pipeThrough(new CompressionStream("gzip"));
+	return toB64(new Uint8Array(await new Response(stream).arrayBuffer()));
+}
+
+/** Windows：把脚本压缩成一行命令，粘贴到 cmd 或 PowerShell 直接回车即可运行。
+ *  内层不含 $ 和双引号，所以在 PowerShell 里粘贴时外层字符串也不会被展开。超长时返回 null。 */
+export async function windowsOneLiner(script: string): Promise<string | null> {
+	const b64 = await gzipB64(script);
+	const cmd =
+		`powershell -nop -c "iex ([IO.StreamReader]::new([IO.Compression.GZipStream]::new([IO.MemoryStream]::new(` +
+		`[Convert]::FromBase64String('${b64}')),[IO.Compression.CompressionMode]::Decompress),[Text.Encoding]::UTF8).ReadToEnd())"`;
+	return cmd.length <= WINDOWS_MAX_LINE ? cmd : null;
 }
