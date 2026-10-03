@@ -1,4 +1,4 @@
-import { ShieldAlertIcon, ShieldCheckIcon, ShieldQuestionIcon } from "lucide-react";
+import { CheckIcon, CopyIcon, ShieldAlertIcon, ShieldCheckIcon, ShieldQuestionIcon } from "lucide-react";
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
@@ -66,6 +66,7 @@ export function TrustHostKeyDialog({ server, open, onOpenChange, onDone }: {
 	const [error, setError] = useState("");
 	const [scanned, setScanned] = useState<Fp[] | null>(null);
 	const [pasted, setPasted] = useState("");
+	const [cmdCopied, setCmdCopied] = useState(false);
 	const pattern = server.port === 22 ? server.hostname : `[${server.hostname}]:${server.port}`;
 	const scanCmd = `ssh-keyscan${server.port === 22 ? "" : ` -p ${server.port}`} ${server.hostname}`;
 
@@ -81,7 +82,7 @@ export function TrustHostKeyDialog({ server, open, onOpenChange, onDone }: {
 	const changed = !!scanned && trusted.length > 0 && scanned.some((f) => !trustedSet.has(f.line));
 
 	useEffect(() => {
-		if (!open) { setScanned(null); setError(""); setPasted(""); return; }
+		if (!open) { setScanned(null); setError(""); setPasted(""); setCmdCopied(false); return; }
 		setScanning(true);
 		runJob("scan_host_key", { serverId: server.id, timeoutMs: 90_000 })
 			.then(async (r) => {
@@ -114,12 +115,24 @@ export function TrustHostKeyDialog({ server, open, onOpenChange, onDone }: {
 				</DialogHeader>
 				{scanning && <p className="text-sm text-muted-foreground">正在从 {server.hostname}:{server.port} 获取主机公钥…</p>}
 				{error && <p className="text-sm text-destructive">{error}</p>}
-				{error && !scanned && (
-					<div className="grid gap-2 text-sm">
+				{!scanned && (
+					<div className="grid gap-2 border-t pt-3 text-sm">
 						<p className="text-muted-foreground">
-							运行 agent 的电脑连不到这台设备（比如它在另一个局域网）。可以在<b>能访问它的电脑</b>上运行下面的命令，把输出粘贴进来：
+							{error ? "运行 agent 的电脑连不到这台设备（比如它在另一个局域网）。" : "不想等自动获取，或设备在别的局域网？"}
+							在<b>能访问它的电脑</b>上运行下面的命令（终端或 Windows cmd 都可以），把输出粘贴进来：
 						</p>
-						<pre className="w-fit max-w-full overflow-x-auto rounded-md bg-muted px-3 py-2 font-mono text-xs">{scanCmd}</pre>
+						<div className="flex flex-wrap items-center gap-2">
+							<pre className="w-fit max-w-full overflow-x-auto rounded-md bg-muted px-3 py-2 font-mono text-xs">{scanCmd}</pre>
+							<Button size="sm" variant="outline" onClick={async () => {
+								try {
+									await navigator.clipboard.writeText(scanCmd);
+									setCmdCopied(true);
+									toast.success("命令已复制");
+								} catch { toast.error("复制失败，请手动选择复制"); }
+							}}>
+								{cmdCopied ? <CheckIcon /> : <CopyIcon />}{cmdCopied ? "已复制" : "复制命令"}
+							</Button>
+						</div>
 						<Textarea rows={4} className="font-mono text-xs" placeholder={`${pattern} ssh-ed25519 AAAA…`} value={pasted} onChange={(e) => setPasted(e.target.value)} />
 						<Button size="sm" variant="outline" className="w-fit" disabled={!pasted.trim()} onClick={usePasted}>使用粘贴的公钥</Button>
 					</div>
