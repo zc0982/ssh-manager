@@ -7,12 +7,13 @@ import shutil
 import subprocess
 from pathlib import Path
 
-from .keys import KeyPair, public_key_line
+from .keys import KeyPair, private_key_encrypted, public_key_line
 from .skill import ALIAS_RE, SkillBridge, SkillError
 
 TEST_COMMAND = "hostname && uptime && (uname -sr || true)"
 MAX_KEY_FILE = 64 * 1024
-HOSTKEY_RE = re.compile(r"^(\S+) ((?:ssh-|ecdsa-|sk-)\S+) ([A-Za-z0-9+/]+={0,2})$")
+# 与 worker/shared/ssh.ts 的 HOSTKEY_RE 保持一致：主机和类型只允许安全字符
+HOSTKEY_RE = re.compile(r"^(\[[A-Za-z0-9.:_-]+\]:\d{1,5}|[A-Za-z0-9.:_-]+) ([a-z0-9@.-]+) ([A-Za-z0-9+/]+={0,2})$")
 
 
 def known_hosts_pattern(hostname: str, port: int) -> str:
@@ -254,8 +255,8 @@ class Handlers:
         if not path.is_file() or path.stat().st_size > MAX_KEY_FILE:
             return None
         data = path.read_bytes()
-        if b"PRIVATE KEY" not in data:
-            return None
+        if b"PRIVATE KEY" not in data or private_key_encrypted(data):
+            return None  # 带口令的私钥 ssh-skill 无法非交互使用，保留本机路径、不上传
         for name, plain in cloud_keys.items():
             if plain == data:
                 return {"name": name, "existing": True}

@@ -10,8 +10,9 @@
 		"emitDeclarationOnly": true,
 		"outDir": ".cloudflare/tsbuild/client",
 		"isolatedModules": true,
+		"allowImportingTsExtensions": true,
 		"skipLibCheck": true,
 		"paths": { "@/*": ["./client/*"] }
 	},
-	"include": ["client"]
+	"include": ["client", "shared"]
 }

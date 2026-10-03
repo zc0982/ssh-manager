@@ -14,5 +14,5 @@
 		"verbatimModuleSyntax": true,
 		"skipLibCheck": true
 	},
-	"include": ["src", "cloudflare.config.ts", ".cloudflare/types"]
+	"include": ["src", "shared", "cloudflare.config.ts", ".cloudflare/types"]
 }

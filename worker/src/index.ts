@@ -1,5 +1,6 @@
 import postgres from "postgres";
 import { authenticate, type AuthEnv, type Identity } from "./auth.ts";
+import { blobType, fingerprint, fromB64, knownHostsPattern, parseHostKey, PUBKEY_RE, SAFE_HOST_RE } from "../shared/ssh.ts";
 
 interface Env extends AuthEnv {
 	HYPERDRIVE: Hyperdrive;
@@ -67,7 +68,8 @@ function parseServer(b: any) {
 		port,
 		username: str(b.username, "用户名", { required: true, re: TOKEN_RE, max: 64 })!,
 		auth_type,
-		identity_file: auth_type === "key" && !key_id ? str(b.identity_file, "密钥文件", { max: 1024 }) : null,
+		// 会原样写进 ~/.ssh/config 的 IdentityFile，不能有空白或引号（否则整个配置文件解析失败）
+		identity_file: auth_type === "key" && !key_id ? str(b.identity_file, "密钥文件路径（不能包含空格或引号）", { re: /^[^\s"']+$/, max: 1024 }) : null,
 		key_id,
 		proxy_jump: str(b.proxy_jump, "跳板机", { re: ALIAS_RE, max: 64 }),
 		environment: str(b.environment, "环境", { re: ENV_RE, max: 32 }) ?? "development",
@@ -102,27 +104,30 @@ async function assertKey(sql: Sql, keyId: string | null) {
 	if (!k) throw new HttpError(422, "选择的云端密钥不存在");
 }
 
-const PUBKEY_RE = /^(ssh-(?:rsa|ed25519|dss)|ecdsa-sha2-nistp(?:256|384|521)|sk-[a-z0-9@.-]+) ([A-Za-z0-9+/]+={0,2})(?: [^\r\n]*)?$/;
-
 /** 校验 OpenSSH 公钥行并计算 SHA256 指纹（与 ssh-keygen -l 相同） */
 async function parsePublicKey(line: unknown): Promise<{ public_key: string; fingerprint: string } | null> {
 	if (line === undefined || line === null || line === "") return null;
 	if (typeof line !== "string" || line.length > 16000) throw new HttpError(422, "公钥格式不正确");
 	const text = line.trim();
 	const m = text.match(PUBKEY_RE);
-	if (!m) throw new HttpError(422, "公钥格式不正确，应为 ssh-ed25519 / ssh-rsa / ecdsa-… 开头的一行");
-	let blob: Uint8Array;
+	if (!m) throw new HttpError(422, "公钥格式不正确，应为 ssh-ed25519 / ssh-rsa / ecdsa-… 开头的一行（注释里不能有引号）");
+	let blob: Uint8Array<ArrayBuffer>;
 	try {
-		blob = Uint8Array.from(atob(m[2]), (c) => c.charCodeAt(0));
+		blob = fromB64(m[2]);
 	} catch {
 		throw new HttpError(422, "公钥内容不是合法的 base64");
 	}
-	const len = blob.length >= 4 ? new DataView(blob.buffer).getUint32(0) : -1;
-	const type = len > 0 && len + 4 <= blob.length ? new TextDecoder().decode(blob.slice(4, 4 + len)) : "";
-	if (type !== m[1]) throw new HttpError(422, "公钥内容与类型不符");
-	const hash = new Uint8Array(await crypto.subtle.digest("SHA-256", blob));
-	const fingerprint = "SHA256:" + btoa(String.fromCharCode(...hash)).replace(/=+$/, "");
-	return { public_key: text, fingerprint };
+	if (blobType(blob) !== m[1]) throw new HttpError(422, "公钥内容与类型不符");
+	return { public_key: text, fingerprint: await fingerprint(blob) };
+}
+
+/** 同一地址（主机+端口）已信任的主机公钥；known_hosts 按地址记录，同地址的服务器必须共用一份 */
+async function hostKeysFor(sql: Sql, hostname: string, port: number, exceptId: string | null = null): Promise<string[]> {
+	const [row] = await sql`
+		select host_keys from servers
+		where hostname = ${hostname} and port = ${port} and cardinality(host_keys) > 0 and id is distinct from ${exceptId}
+		order by updated_at desc limit 1`;
+	return row?.host_keys ?? [];
 }
 
 function parseKey(b: any) {
@@ -139,9 +144,6 @@ async function attachKeys(sql: Sql, servers: any[]) {
 	const byId = new Map(keys.map((k: any) => [k.id, k]));
 	for (const s of servers) if (s.key_id) s.key = byId.get(s.key_id) ?? null;
 }
-
-const HOSTKEY_RE = /^(\S+) ((?:ssh-|ecdsa-|sk-)\S+) ([A-Za-z0-9+/]+={0,2})$/;
-const knownHostsPattern = (hostname: string, port: number) => (port === 22 ? hostname : `[${hostname}]:${port}`);
 
 function publicServer(s: any) {
 	const { password_encrypted, ...rest } = s;
@@ -180,6 +182,9 @@ function clip(v: unknown) {
 async function userApi(req: Request, sql: Sql, me: string, path: string[]): Promise<Response> {
 	const m = req.method;
 	const [a, b, c] = path;
+	// 路径里的 id 格式不对时直接 404，避免数据库类型转换报错变成 500
+	if (b && (a === "servers" || a === "keys") && !UUID_RE.test(b)) throw new HttpError(404, "不存在");
+	if (b && a === "jobs" && !/^\d{1,18}$/.test(b)) throw new HttpError(404, "任务不存在");
 
 	if (a === "me" && m === "GET") return json({ email: me });
 
@@ -338,7 +343,8 @@ async function userApi(req: Request, sql: Sql, me: string, path: string[]): Prom
 			await assertEnv(sql, s.environment);
 			const exists = await sql`select 1 from servers where alias = ${s.alias}`;
 			if (exists.length) throw new HttpError(409, `别名 ${s.alias} 已存在`);
-			const [row] = await sql`insert into servers ${sql({ ...s, password_encrypted: enc } as any)} returning *`;
+			const inherited = await hostKeysFor(sql, s.hostname, s.port);
+			const [row] = await sql`insert into servers ${sql({ ...s, password_encrypted: enc, host_keys: inherited } as any)} returning *`;
 			const job = await enqueue(sql, me, "sync", row);
 			return json({ server: publicServer(row), job }, 201);
 		}
@@ -346,17 +352,22 @@ async function userApi(req: Request, sql: Sql, me: string, path: string[]): Prom
 		if (b && c === "host-keys" && m === "PUT") {
 			const [server] = await sql`select id, alias, hostname, port from servers where id = ${b}`;
 			if (!server) throw new HttpError(404, "服务器不存在");
+			if (!SAFE_HOST_RE.test(server.hostname)) throw new HttpError(422, "主机地址含有不支持的字符，无法信任主机指纹");
 			const { lines } = await body(req);
 			if (!Array.isArray(lines) || lines.length > 10) throw new HttpError(422, "lines 格式不正确");
 			const pattern = knownHostsPattern(server.hostname, server.port);
-			const clean = [...new Set(lines.map((l: unknown) => String(l).trim()))];
-			for (const l of clean) {
-				const mm = l.match(HOSTKEY_RE);
-				if (!mm || mm[1] !== pattern) throw new HttpError(422, `主机公钥与服务器地址 ${pattern} 不符`);
+			const clean: string[] = [];
+			for (const l of new Set(lines.map((x: unknown) => String(x).trim()))) {
+				const hk = await parseHostKey(l);
+				if (!hk || !hk.line.startsWith(pattern + " ")) throw new HttpError(422, `主机公钥格式不正确，或与服务器地址 ${pattern} 不符`);
+				clean.push(hk.line);
 			}
-			const [row] = await sql`update servers set host_keys = ${clean} where id = ${b} returning *`;
-			const job = clean.length ? await enqueue(sql, me, "sync", row) : null;
-			return json({ server: publicServer(row), job });
+			// known_hosts 按地址记录：同一地址的所有服务器一起更新，并都同步到本机
+			const rows = await sql`update servers set host_keys = ${clean}
+				where hostname = ${server.hostname} and port = ${server.port} returning *`;
+			const jobs = clean.length ? await Promise.all(rows.map((r: any) => enqueue(sql, me, "sync", r))) : [];
+			const row = rows.find((r: any) => r.id === server.id);
+			return json({ server: publicServer(row), job: jobs.find((j: any) => j.server_id === server.id) ?? null, updated: rows.map((r: any) => r.alias) });
 		}
 
 		if (b && !c) {
@@ -381,7 +392,8 @@ async function userApi(req: Request, sql: Sql, me: string, path: string[]): Prom
 				}
 				// 地址或端口变了，之前信任的主机公钥不再适用
 				const addrChanged = s.hostname !== existing.hostname || s.port !== existing.port;
-				const [row] = await sql`update servers set ${sql({ ...s, password_encrypted: enc, ...(addrChanged ? { host_keys: [] } : {}) } as any)} where id = ${b} returning *`;
+				const hostKeys = addrChanged ? await hostKeysFor(sql, s.hostname, s.port, b) : undefined;
+				const [row] = await sql`update servers set ${sql({ ...s, password_encrypted: enc, ...(hostKeys ? { host_keys: hostKeys } : {}) } as any)} where id = ${b} returning *`;
 				if (s.alias !== existing.alias) await enqueue(sql, me, "remove_local", null, { alias: existing.alias });
 				const job = await enqueue(sql, me, "sync", row);
 				return json({ server: publicServer(row), job });

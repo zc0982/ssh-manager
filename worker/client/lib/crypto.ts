@@ -1,10 +1,7 @@
+import { toB64 } from "../../shared/ssh.ts";
 // 浏览器端加密：只有本机 agent 持有对应私钥，Worker 和数据库只能看到密文。
 
-const b64 = (buf: ArrayBuffer | Uint8Array) => {
-	let s = "";
-	for (const b of new Uint8Array(buf)) s += String.fromCharCode(b);
-	return btoa(s);
-};
+const b64 = toB64;
 
 let cached: { jwk: string; key: CryptoKey } | null = null;
 

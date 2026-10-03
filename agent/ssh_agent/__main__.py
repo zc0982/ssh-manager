@@ -51,7 +51,7 @@ def make_client() -> httpx.Client:
     url = setting("SSH_MANAGER_URL").rstrip("/")
     cid, secret = setting("CF_ACCESS_CLIENT_ID"), setting("CF_ACCESS_CLIENT_SECRET")
     if not url or not cid or not secret:
-        sys.exit(f"请在 {ENV_FILE} 中配置 SSH_MANAGER_URL、CF_ACCESS_CLIENT_ID、CF_ACCESS_CLIENT_SECRET（新电脑请用网页「新电脑」里的安装命令）")
+        sys.exit(f"请在 {ENV_FILE} 中配置 SSH_MANAGER_URL、CF_ACCESS_CLIENT_ID、CF_ACCESS_CLIENT_SECRET（新电脑请先运行 ./setup.sh）")
     return httpx.Client(base_url=url, timeout=httpx.Timeout(10, read=60),
                         headers={"CF-Access-Client-Id": cid, "CF-Access-Client-Secret": secret,
                                  "User-Agent": f"ssh-manager-agent/{VERSION}"})
@@ -192,7 +192,7 @@ def main() -> None:
     logging.getLogger("httpx").setLevel(logging.WARNING)
     p = argparse.ArgumentParser(prog="ssh_agent")
     p.add_argument("command", choices=["run", "install-launchd", "pubkey", "backup-key", "restore-key", "setup"])
-    p.add_argument("file", nargs="?", help="setup：配对链接（网页「新电脑」生成）或下载的 ssh-manager-setup.json")
+    p.add_argument("file", nargs="?", help="setup：网页「新电脑」里下载的 ssh-manager-setup.json")
     args = p.parse_args()
     if args.command == "run":
         run()

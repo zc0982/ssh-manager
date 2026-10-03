@@ -15,6 +15,22 @@ AAD_V2 = b"ssh-manager-bundle-v2"
 OAEP = padding.OAEP(mgf=padding.MGF1(algorithm=hashes.SHA256()), algorithm=hashes.SHA256(), label=None)
 
 
+def private_key_encrypted(private_key: bytes) -> bool:
+    """私钥是否带口令（OpenSSH 或 PEM 格式）。"""
+    if b"Proc-Type: 4,ENCRYPTED" in private_key or b"BEGIN ENCRYPTED PRIVATE KEY" in private_key:
+        return True
+    try:
+        if b"OPENSSH PRIVATE KEY" in private_key:
+            serialization.load_ssh_private_key(private_key, password=None)
+        else:
+            serialization.load_pem_private_key(private_key, password=None)
+    except TypeError:
+        return True  # cryptography 在需要口令时抛 TypeError
+    except Exception:
+        return False
+    return False
+
+
 def public_key_line(private_key: bytes, comment: str = "") -> str | None:
     """从私钥（OpenSSH 或 PEM 格式，不带口令）推导 OpenSSH 公钥行；失败返回 None。"""
     try:

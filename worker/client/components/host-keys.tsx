@@ -1,22 +1,15 @@
 import { CheckIcon, CopyIcon, ShieldAlertIcon, ShieldCheckIcon, ShieldQuestionIcon } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Textarea } from "@/components/ui/textarea";
 import { api, runJob, type Server } from "@/lib/api";
+import { type HostKey, knownHostsPattern, parseHostKey } from "../../shared/ssh.ts";
 
-type Fp = { type: string; fingerprint: string; line: string };
-
-/** 计算 known_hosts 行的 SHA256 指纹（与 ssh-keygen -l 相同） */
-async function fingerprintOf(line: string): Promise<Fp | null> {
-	const m = line.trim().match(/^(\S+) ((?:ssh-|ecdsa-|sk-)\S+) ([A-Za-z0-9+/]+={0,2})$/);
-	if (!m) return null;
-	const blob = Uint8Array.from(atob(m[3]), (c) => c.charCodeAt(0));
-	const hash = new Uint8Array(await crypto.subtle.digest("SHA-256", blob));
-	return { type: m[2], fingerprint: "SHA256:" + btoa(String.fromCharCode(...hash)).replace(/=+$/, ""), line: line.trim() };
-}
+type Fp = HostKey;
+const fingerprintOf = parseHostKey;
 
 const typeLabel = (t: string) => t.replace(/^ssh-/, "").replace(/^ecdsa-sha2-/, "ECDSA ").toUpperCase();
 
@@ -67,30 +60,43 @@ export function TrustHostKeyDialog({ server, open, onOpenChange, onDone }: {
 	const [scanned, setScanned] = useState<Fp[] | null>(null);
 	const [pasted, setPasted] = useState("");
 	const [cmdCopied, setCmdCopied] = useState(false);
-	const pattern = server.port === 22 ? server.hostname : `[${server.hostname}]:${server.port}`;
+	const pattern = knownHostsPattern(server.hostname, server.port);
+	const usedPaste = useRef(false); // 用了手动粘贴后，忽略还在进行的自动获取结果
 	const scanCmd = `ssh-keyscan${server.port === 22 ? "" : ` -p ${server.port}`} ${server.hostname}`;
 
 	async function usePasted() {
 		const lines = pasted.split(/\r?\n/).map((l) => l.trim()).filter((l) => l && !l.startsWith("#"));
 		const fps = (await Promise.all(lines.map(fingerprintOf))).filter((f): f is Fp => !!f && f.line.startsWith(pattern + " "));
 		if (!fps.length) return setError(`没有找到 ${pattern} 的主机公钥行，请确认粘贴的是上面命令的输出`);
+		usedPaste.current = true;
+		setScanning(false);
 		setError("");
 		setScanned(fps);
 	}
 	const trusted = useFingerprints(server.host_keys ?? []);
 	const trustedSet = new Set(trusted.map((f) => f.line));
-	const changed = !!scanned && trusted.length > 0 && scanned.some((f) => !trustedSet.has(f.line));
+	// 只有「同类型的密钥变了」或「一个都对不上」才算指纹变化；多出来的密钥类型不算
+	const trustedByType = new Map(trusted.map((f) => [f.type, f.line]));
+	const changed = !!scanned && trusted.length > 0 && (
+		scanned.some((f) => trustedByType.has(f.type) && trustedByType.get(f.type) !== f.line) ||
+		!scanned.some((f) => trustedSet.has(f.line))
+	);
 
 	useEffect(() => {
 		if (!open) { setScanned(null); setError(""); setPasted(""); setCmdCopied(false); return; }
+		let cancelled = false; // 关闭或重新打开后，旧的获取结果不再生效
+		usedPaste.current = false;
 		setScanning(true);
+		const stale = () => cancelled || usedPaste.current;
 		runJob("scan_host_key", { serverId: server.id, timeoutMs: 90_000 })
 			.then(async (r) => {
 				if (!r.success) throw new Error(r.error || "获取失败");
-				setScanned((await Promise.all((r.lines as string[]).map(fingerprintOf))).filter(Boolean) as Fp[]);
+				const fps = (await Promise.all((r.lines as string[]).map(fingerprintOf))).filter(Boolean) as Fp[];
+				if (!stale()) setScanned(fps);
 			})
-			.catch((e) => setError(e.message))
-			.finally(() => setScanning(false));
+			.catch((e) => { if (!stale()) setError(e.message); })
+			.finally(() => { if (!stale()) setScanning(false); });
+		return () => { cancelled = true; };
 	}, [open, server.id]);
 
 	async function trust() {

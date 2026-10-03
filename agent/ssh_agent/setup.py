@@ -70,7 +70,7 @@ def write_env(values: dict) -> None:
 def run_setup(bundle_arg: str | None, key_path: Path, skill_dir: Path, agent_name: str, install_launchd) -> None:
     total = 6
     print("SSH Manager 新电脑设置向导")
-    print("会用到：你设置的主密码。")
+    print("会用到：网页「新电脑」里下载的 ssh-manager-setup.json，以及你设置的主密码。")
 
     # 1. 前置检查
     step(1, total, "检查本机环境")
@@ -83,20 +83,13 @@ def run_setup(bundle_arg: str | None, key_path: Path, skill_dir: Path, agent_nam
         fail("没有找到 ssh 命令", "安装 OpenSSH 客户端")
     ok("OpenSSH 客户端")
 
-    # 2. 获取设置（配对链接，或网页下载的设置文件）
-    step(2, total, "获取云端设置")
+    # 2. 读取设置文件
+    step(2, total, "读取设置文件")
     try:
-        if bundle_arg and bundle_arg.startswith("https://"):
-            r = httpx.get(bundle_arg, timeout=30)
-            if r.status_code != 200:
-                detail = r.json().get("detail", r.text[:200]) if r.headers.get("content-type", "").startswith("application/json") else r.text[:200]
-                fail(f"配对失败：{detail}", "在网页「新电脑」里重新生成安装命令（配对码 10 分钟内有效，只能用一次）")
-            bundle = r.json()
-        else:
-            bundle = json.loads(find_bundle(bundle_arg).read_text())
+        bundle = json.loads(find_bundle(bundle_arg).read_text())
         url, backup = bundle["url"].rstrip("/"), bundle["backup"]
-    except (OSError, ValueError, KeyError, httpx.HTTPError) as e:
-        fail(f"无法读取云端设置：{e}", "在网页「新电脑」里重新生成安装命令")
+    except (OSError, ValueError, KeyError) as e:
+        fail(f"无法读取设置文件：{e}", "在网页「新电脑」→「安装后台 agent」里重新下载")
     if not backup.get("has_env"):
         fail("这个备份只包含 agent 私钥，不含连接凭证（旧版备份）",
              "在旧电脑上运行 ./setup.sh backup 更新备份后，重新下载设置文件")

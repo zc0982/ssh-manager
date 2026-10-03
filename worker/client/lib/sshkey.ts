@@ -2,12 +2,7 @@
 // 支持：OpenSSH 格式（公钥以明文存在文件头里，任意算法）、RSA 的 PEM（PKCS#1 / PKCS#8）。
 // 其他格式返回 null，由用户手动提供 .pub。
 
-const fromB64 = (s: string) => Uint8Array.from(atob(s), (c) => c.charCodeAt(0));
-const toB64 = (b: Uint8Array) => {
-	let s = "";
-	for (const x of b) s += String.fromCharCode(x);
-	return btoa(s);
-};
+import { fromB64, toB64 } from "../../shared/ssh.ts";
 
 function pemBody(text: string, label: RegExp): Uint8Array | null {
 	const m = text.match(new RegExp(`-----BEGIN ${label.source}-----([\\s\\S]*?)-----END ${label.source}-----`));
@@ -27,17 +22,19 @@ function readString(buf: Uint8Array, off: number): [Uint8Array, number] {
 	return [buf.subarray(off + 4, off + 4 + len), off + 4 + len];
 }
 
-function opensshPublic(buf: Uint8Array): string | null {
+/** 解析 OpenSSH 私钥文件头：公钥（明文）和是否加了口令（cipher 不是 none） */
+function opensshInfo(buf: Uint8Array): { publicKey: string; encrypted: boolean } | null {
 	const magic = new TextEncoder().encode("openssh-key-v1\0");
 	if (!magic.every((b, i) => buf[i] === b)) return null;
 	let off = magic.length;
-	[, off] = readString(buf, off); // cipher
+	let cipher: Uint8Array;
+	[cipher, off] = readString(buf, off);
 	[, off] = readString(buf, off); // kdf
 	[, off] = readString(buf, off); // kdf options
 	off += 4; // 密钥数量
 	const [blob] = readString(buf, off);
 	const [type] = readString(blob, 0);
-	return `${new TextDecoder().decode(type)} ${toB64(blob)}`;
+	return { publicKey: `${new TextDecoder().decode(type)} ${toB64(blob)}`, encrypted: new TextDecoder().decode(cipher) !== "none" };
 }
 
 // ---------- RSA PEM：最小 DER 解析 ----------
@@ -110,17 +107,23 @@ function sshRsa(e: Uint8Array, n: Uint8Array) {
 	return `ssh-rsa ${toB64(blob)}`;
 }
 
-/** 从私钥文件内容提取公钥行（不含注释）；无法识别时返回 null */
-export function derivePublicKey(privateKey: string): string | null {
+export type PrivateKeyInfo = { publicKey: string | null; encrypted: boolean };
+
+/** 检查私钥文件：提取公钥行（不含注释，无法识别时为 null），并判断是否加了口令 */
+export function inspectPrivateKey(privateKey: string): PrivateKeyInfo {
+	if (/Proc-Type: 4,ENCRYPTED|BEGIN ENCRYPTED PRIVATE KEY/.test(privateKey)) return { publicKey: null, encrypted: true };
 	try {
 		const openssh = pemBody(privateKey, /OPENSSH PRIVATE KEY/);
-		if (openssh) return opensshPublic(openssh);
+		if (openssh) return opensshInfo(openssh) ?? { publicKey: null, encrypted: false };
 		const pkcs1 = pemBody(privateKey, /RSA PRIVATE KEY/);
-		if (pkcs1 && !/Proc-Type: 4,ENCRYPTED/.test(privateKey)) return rsaFromPkcs1(pkcs1);
+		if (pkcs1) return { publicKey: rsaFromPkcs1(pkcs1), encrypted: false };
 		const pkcs8 = pemBody(privateKey, /PRIVATE KEY/);
-		if (pkcs8) return rsaFromPkcs8(pkcs8);
+		if (pkcs8) return { publicKey: rsaFromPkcs8(pkcs8), encrypted: false };
 	} catch {
 		// 格式不认识
 	}
-	return null;
+	return { publicKey: null, encrypted: false };
 }
+
+/** 从私钥文件内容提取公钥行（不含注释）；无法识别时返回 null */
+export const derivePublicKey = (privateKey: string) => inspectPrivateKey(privateKey).publicKey;

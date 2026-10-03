@@ -13,7 +13,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { Textarea } from "@/components/ui/textarea";
 import { api, fmtTime, runJob, type SshKey, type Status } from "@/lib/api";
 import { sealData } from "@/lib/crypto";
-import { derivePublicKey } from "@/lib/sshkey";
+import { inspectPrivateKey } from "@/lib/sshkey";
 import { type Backup, buildSyncScript, type ExportKey, type ExportServer, type SyncResult, unlockAgentKey, windowsOneLiner } from "@/lib/restore";
 import { Field } from "./server-form";
 
@@ -42,10 +42,12 @@ export function KeysDialog({ open, onOpenChange, keys, publicKey, onChanged }: O
 			const bytes = file ? new Uint8Array(await file.arrayBuffer()) : new TextEncoder().encode(text.trim() + "\n");
 			const content = new TextDecoder().decode(bytes);
 			if (!/-----BEGIN [A-Z ]*PRIVATE KEY-----/.test(content)) throw new Error("看起来不是私钥文件（缺少 BEGIN ... PRIVATE KEY）");
-			if (/Proc-Type: 4,ENCRYPTED|BEGIN ENCRYPTED PRIVATE KEY/.test(content)) throw new Error("暂不支持带口令的私钥");
+			const info = inspectPrivateKey(content);
+			// ssh-skill 以非交互方式连接，带口令的私钥无法使用
+			if (info.encrypted) throw new Error("暂不支持带口令的私钥：请先用 ssh-keygen -p -N \"\" -f <文件> 去掉口令后再上传");
 			if (bytes.length > 64 * 1024) throw new Error("文件过大");
 			// 公钥：优先用户提供的 .pub，否则从私钥提取（只读公开部分）
-			const derived = derivePublicKey(content);
+			const derived = info.publicKey;
 			const given = pubText.trim().split("\n")[0]?.trim() || "";
 			if (given && derived && given.split(/\s+/).slice(0, 2).join(" ") !== derived) throw new Error("提供的公钥与私钥不匹配");
 			const public_key = given || (derived ? `${derived} ${name}` : "");

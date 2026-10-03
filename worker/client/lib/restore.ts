@@ -2,6 +2,7 @@
 // 生成一段同步脚本（复制到剪贴板，在终端用 `pbpaste | bash` 运行）。
 // 浏览器不能直接写 ~/.ssh（Chromium 的 File System Access 明确禁止），所以需要这一步终端命令。
 import { scryptAsync } from "@noble/hashes/scrypt.js";
+import { fromB64, HOSTKEY_RE, knownHostsPattern, PUBKEY_RE, SAFE_HOST_RE, toB64 } from "../../shared/ssh.ts";
 
 export type Backup = { v: number; kdf: string; n: number; r: number; p: number; salt: string; nonce: string; ciphertext: string };
 export type ExportServer = {
@@ -17,12 +18,7 @@ const ALIAS_RE = /^[A-Za-z0-9._-]+$/;
 const enc = new TextEncoder();
 const dec = new TextDecoder();
 
-const fromB64 = (s: string) => Uint8Array.from(atob(s), (c) => c.charCodeAt(0));
-const toB64 = (b: Uint8Array) => {
-	let s = "";
-	for (const x of b) s += String.fromCharCode(x);
-	return btoa(s);
-};
+
 
 /** 用主密码解开备份，得到 agent 私钥（WebCrypto RSA-OAEP 解密用） */
 export async function unlockAgentKey(backup: Backup, passphrase: string): Promise<CryptoKey> {
@@ -92,7 +88,6 @@ export type SyncResult = { script: string; servers: number; keyFiles: number; sk
 
 type Prepared = { blocks: string[]; aliases: string[]; keys: Map<string, Uint8Array>; pubs: Map<string, string>; hostKeys: Map<string, string[]>; skipped: string[] };
 
-const HOSTKEY_RE = /^(\S+) ((?:ssh-|ecdsa-|sk-)\S+) ([A-Za-z0-9+/]+={0,2})$/;
 
 /** 解密全部服务器与密钥，生成 ssh-skill 格式的配置块 */
 async function prepare(priv: CryptoKey, servers: ExportServer[], keys: ExportKey[]): Promise<Prepared> {
@@ -117,17 +112,20 @@ async function prepare(priv: CryptoKey, servers: ExportServer[], keys: ExportKey
 			if (k) {
 				if (!ALIAS_RE.test(k.name)) { skipped.push(`${s.alias}（密钥名不合法）`); continue; }
 				if (!used.has(k.name)) used.set(k.name, await unseal(priv, k.key_encrypted));
-				if (k.public_key && /^[a-z0-9@.-]+ [A-Za-z0-9+/=]+( [^\r\n'"]*)?$/.test(k.public_key)) pubs.set(k.name, k.public_key);
+				// 公钥会放进脚本的单引号里，用共享的严格格式校验（注释不含引号）
+				if (k.public_key && PUBKEY_RE.test(k.public_key)) pubs.set(k.name, k.public_key);
 				identity = `~/.ssh/ssh-manager/${k.name}.key`; // Windows 版 OpenSSH 同样支持 ~
 			} else {
 				identity = s.identity_file;
+				// 写进 IdentityFile 的路径不能有空白或引号，否则整个 ~/.ssh/config 解析失败
+				if (identity && /[\s"']/.test(identity)) { skipped.push(`${s.alias}（密钥文件路径含空格或引号）`); continue; }
 			}
 		}
 		aliases.push(s.alias);
 		blocks.push(hostBlock(s, password, identity));
-		const pattern = s.port === 22 ? s.hostname : `[${s.hostname}]:${s.port}`;
+		const pattern = knownHostsPattern(s.hostname, s.port);
 		// 主机名会放进脚本的单引号里，只接受安全字符
-		const lines = /^[A-Za-z0-9.:_-]+$/.test(s.hostname) ? (s.host_keys ?? []).filter((l) => HOSTKEY_RE.exec(l)?.[1] === pattern) : [];
+		const lines = SAFE_HOST_RE.test(s.hostname) ? (s.host_keys ?? []).filter((l) => HOSTKEY_RE.exec(l)?.[1] === pattern) : [];
 		if (lines.length) hostKeys.set(pattern, lines);
 	}
 	return { blocks, aliases, keys: used, pubs, hostKeys, skipped };
@@ -272,7 +270,7 @@ ${knownHostsWindows(p)}try { Set-Clipboard -Value $null } catch { try { Set-Clip
 try {
   $hp = Join-Path $env:APPDATA 'Microsoft\\Windows\\PowerShell\\PSReadLine\\ConsoleHost_history.txt'
   if ($env:APPDATA -and (Test-Path $hp)) {
-    $keep = @(Get-Content $hp | Where-Object { $_ -notmatch 'GZipStream' })
+    $keep = @(Get-Content $hp | Where-Object { -not $_.Contains('#' + 'ssh-manager-sync') })
     Set-Content -Path $hp -Value $keep -Encoding UTF8
   }
 } catch { }
@@ -286,6 +284,9 @@ export async function buildSyncScript(priv: CryptoKey, servers: ExportServer[], 
 	const script = platform === "windows" ? renderWindows(p) : renderPosix(p);
 	return { script, servers: p.aliases.length, keyFiles: p.keys.size, skipped: p.skipped, platform };
 }
+
+/** 写在一行命令末尾的注释，脚本据此只从 PowerShell 历史里删掉这一条命令 */
+const HISTORY_MARKER = "#ssh-manager-sync";
 
 /** cmd 单行命令上限 8191 字符，留一点余量 */
 const WINDOWS_MAX_LINE = 8000;
@@ -301,6 +302,6 @@ export async function windowsOneLiner(script: string): Promise<string | null> {
 	const b64 = await gzipB64(script);
 	const cmd =
 		`powershell -nop -c "iex ([IO.StreamReader]::new([IO.Compression.GZipStream]::new([IO.MemoryStream]::new(` +
-		`[Convert]::FromBase64String('${b64}')),[IO.Compression.CompressionMode]::Decompress),[Text.Encoding]::UTF8).ReadToEnd())"`;
+		`[Convert]::FromBase64String('${b64}')),[IO.Compression.CompressionMode]::Decompress),[Text.Encoding]::UTF8).ReadToEnd()) ${HISTORY_MARKER}"`;
 	return cmd.length <= WINDOWS_MAX_LINE ? cmd : null;
 }
