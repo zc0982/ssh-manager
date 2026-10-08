@@ -93,10 +93,12 @@ def run() -> None:
     log.info("agent %s 已连接 %s（ssh-skill: %s）", agent_name(), client.base_url, status["skill_dir"])
 
     backoff = 1
+    fast = False  # 刚做完任务时让服务器短时间内更频繁地检查（常有连续操作）
     while True:
         try:
-            job = check(client.post("/api/agent/poll", json={"agent_id": agent_id})).get("job")
+            job = check(client.post("/api/agent/poll", json={"agent_id": agent_id, "fast": fast})).get("job")
             backoff = 1
+            fast = bool(job)
         except (httpx.HTTPError, RuntimeError) as e:
             log.warning("轮询失败：%s，%ss 后重试", e, backoff)
             time.sleep(backoff)

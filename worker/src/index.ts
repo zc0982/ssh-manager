@@ -20,7 +20,11 @@ const ENV_RE = /^[A-Za-z0-9._-]{1,32}$/;
 const ENV_COLORS = new Set(["magenta", "cyan", "yellow", "purple", "green", "orange", "blue", "gray"]);
 const MAX_RESULT_TEXT = 100_000;
 const AGENT_ONLINE_MS = 60_000;
-const POLL_WAIT_MS = 20_000;
+// agent 长轮询：Hyperdrive 免费额度是每天 10 万条查询，空闲时要省着查
+const POLL_WAIT_MS = 25_000; // 每次长轮询最多等待
+const POLL_IDLE_MS = 3_000; // 空闲时检查新任务的间隔
+const POLL_FAST_MS = 1_000; // 刚做完任务后（常有连续操作）的检查间隔
+const POLL_FAST_WINDOW_MS = 10_000; // 快速检查持续多久
 
 // 网页可以提交的任务类型；需要绑定服务器的类型在 SERVER_JOBS 中
 const USER_JOBS = new Set(["scan_host_key", "test", "exec", "upload", "download", "tunnel_start", "tunnel_stop", "tunnel_list", "sync", "sync_all", "local_list", "import"]);
@@ -408,7 +412,8 @@ async function userApi(req: Request, sql: Sql, me: string, path: string[]): Prom
 	}
 
 	if (a === "jobs") {
-		await reapStale(sql);
+		// 清理超时任务只在列表和提交时做；网页轮询单个任务状态很频繁，不在那里多查
+		if (!b) await reapStale(sql);
 		if (!b && m === "GET") {
 			const url = new URL(req.url);
 			const serverId = url.searchParams.get("server_id");
@@ -486,16 +491,28 @@ async function agentApi(req: Request, sql: Sql, path: string[]): Promise<Respons
 	}
 
 	if (a === "poll" && req.method === "POST") {
-		const { agent_id } = await body(req);
-		const deadline = Date.now() + POLL_WAIT_MS;
+		const { agent_id, fast } = await body(req);
+		if (typeof agent_id !== "string" || !UUID_RE.test(agent_id)) throw new HttpError(422, "agent_id 格式不正确");
+		const start = Date.now();
+		const deadline = start + POLL_WAIT_MS;
+		let heartbeat = true; // 心跳只在每次长轮询的第一次检查时更新（在线判定阈值 60 秒）
 		while (true) {
-			await sql`update agents set last_seen = now() where id = ${agent_id}`;
-			const [job] = await sql`
-				update jobs set status = 'running', started_at = now(), agent_id = ${agent_id}
-				where id = (
-					select id from jobs where status = 'queued' and (agent_id is null or agent_id = ${agent_id})
-					order by id limit 1 for update skip locked)
-				returning *`;
+			// 心跳与领取任务合并为一条语句，减少查询次数
+			const [job] = heartbeat
+				? await sql`
+					with hb as (update agents set last_seen = now() where id = ${agent_id})
+					update jobs set status = 'running', started_at = now(), agent_id = ${agent_id}
+					where id = (
+						select id from jobs where status = 'queued' and (agent_id is null or agent_id = ${agent_id})
+						order by id limit 1 for update skip locked)
+					returning *`
+				: await sql`
+					update jobs set status = 'running', started_at = now(), agent_id = ${agent_id}
+					where id = (
+						select id from jobs where status = 'queued' and (agent_id is null or agent_id = ${agent_id})
+						order by id limit 1 for update skip locked)
+					returning *`;
+			heartbeat = false;
 			if (job) {
 				// 附带执行任务所需的服务器信息（包括密码密文，由 agent 本地解密）
 				if (job.type === "sync_all" || job.type === "local_list" || job.type === "import") {
@@ -509,7 +526,8 @@ async function agentApi(req: Request, sql: Sql, path: string[]): Promise<Respons
 				return json({ job });
 			}
 			if (Date.now() >= deadline) return json({ job: null });
-			await new Promise((r) => setTimeout(r, 1000));
+			const interval = fast && Date.now() - start < POLL_FAST_WINDOW_MS ? POLL_FAST_MS : POLL_IDLE_MS;
+			await new Promise((r) => setTimeout(r, Math.min(interval, Math.max(0, deadline - Date.now()))));
 		}
 	}
 
