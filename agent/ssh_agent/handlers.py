@@ -7,7 +7,7 @@ import shutil
 import subprocess
 from pathlib import Path
 
-from .keys import KeyPair, private_key_encrypted, public_key_line
+from .keys import KeyPair, ensure_openssh_final_newline, private_key_encrypted, public_key_line
 from .skill import ALIAS_RE, SkillBridge, SkillError
 
 TEST_COMMAND = "hostname && uptime && (uname -sr || true)"
@@ -60,7 +60,7 @@ class Handlers:
         """把云端密钥解密写到 ~/.ssh/ssh-manager/<name>.key（目录 700，文件 600）。"""
         if not ALIAS_RE.match(key["name"]):
             raise RuntimeError(f"非法密钥名：{key['name']}")
-        data = self.keys.unseal(key["key_encrypted"])
+        data = ensure_openssh_final_newline(self.keys.unseal(key["key_encrypted"]))
         d = self.skill.home / ".ssh" / "ssh-manager"
         d.mkdir(mode=0o700, parents=True, exist_ok=True)
         path = d / f"{key['name']}.key"
@@ -222,7 +222,7 @@ class Handlers:
         cloud_keys = {}  # name -> 明文，用于比对去重
         for k in job.get("keys") or []:
             try:
-                cloud_keys[k["name"]] = self.keys.unseal(k["key_encrypted"])
+                cloud_keys[k["name"]] = ensure_openssh_final_newline(self.keys.unseal(k["key_encrypted"]))
             except RuntimeError:
                 cloud_keys[k["name"]] = None
         cloud = {s["alias"] for s in job.get("servers") or []}
@@ -254,7 +254,7 @@ class Handlers:
         path = Path(os.path.expanduser(identity_file))
         if not path.is_file() or path.stat().st_size > MAX_KEY_FILE:
             return None
-        data = path.read_bytes()
+        data = ensure_openssh_final_newline(path.read_bytes())
         if b"PRIVATE KEY" not in data or private_key_encrypted(data):
             return None  # 带口令的私钥 ssh-skill 无法非交互使用，保留本机路径、不上传
         for name, plain in cloud_keys.items():

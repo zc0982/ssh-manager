@@ -4,6 +4,16 @@
 
 import { fromB64, toB64 } from "../../shared/ssh.ts";
 
+/** OpenSSH 要求私钥结束标记所在行以换行结尾。 */
+export function ensureOpenSshFinalNewline(bytes: Uint8Array<ArrayBuffer>): Uint8Array<ArrayBuffer> {
+	const footer = "\n-----END OPENSSH PRIVATE KEY-----";
+	if (new TextDecoder().decode(bytes.subarray(-footer.length)) !== footer) return bytes;
+	const result = new Uint8Array(bytes.length + 1);
+	result.set(bytes);
+	result[bytes.length] = 0x0a;
+	return result;
+}
+
 function pemBody(text: string, label: RegExp): Uint8Array | null {
 	const m = text.match(new RegExp(`-----BEGIN ${label.source}-----([\\s\\S]*?)-----END ${label.source}-----`));
 	if (!m) return null;

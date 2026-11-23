@@ -181,7 +181,7 @@ def test_sync_with_cloud_key_writes_identity_file(env):
 def test_import_uploads_and_dedupes_keys(env):
     h, keys, cfg = env
     keyfile = h.skill.home / ".ssh" / "id_test"
-    keyfile.write_bytes(FAKE_KEY)
+    keyfile.write_bytes(FAKE_KEY.rstrip(b"\n"))
     with cfg.open("a") as f:
         f.write(f"Host a1\n    HostName 10.0.0.1\n    User u\n    IdentityFile {keyfile}\n\n"
                 f"Host a2\n    HostName 10.0.0.2\n    User u\n    IdentityFile {keyfile}\n\n")
@@ -193,7 +193,8 @@ def test_import_uploads_and_dedupes_keys(env):
     assert rows["a1"]["identity_file"] is None
     assert rows["a2"]["key"] == {"name": "id_test-2", "existing": True}  # 同批次复用
     # 云端已有同内容的密钥时直接复用
-    cloud2 = [{"name": "mine", "key_encrypted": keys.seal(FAKE_KEY)}]
+    keyfile.write_bytes(FAKE_KEY)
+    cloud2 = [{"name": "mine", "key_encrypted": keys.seal(FAKE_KEY.rstrip(b"\n"))}]
     _, extra = h.handle({"type": "import", "servers": [], "keys": cloud2, "payload": {"aliases": ["a1"], "upload_keys": True}})
     assert extra["import_rows"][0]["key"] == {"name": "mine", "existing": True}
     # 不勾选上传时保留本机路径
@@ -280,6 +281,26 @@ def _keygen(tmp_path, name, *args):
     subprocess.run(["ssh-keygen", "-q", "-N", "", "-C", "", "-f", str(path), *args], check=True)
     want = subprocess.run(["ssh-keygen", "-y", "-f", str(path)], capture_output=True, text=True, check=True).stdout.split()[:2]
     return path.read_bytes(), " ".join(want)
+
+
+@pytest.mark.skipif(not shutil.which("ssh-keygen"), reason="需要 ssh-keygen")
+def test_sync_repairs_missing_openssh_final_newline(env, tmp_path):
+    h, keys, _ = env
+    data, want = _keygen(tmp_path, "original", "-t", "ed25519")
+    legacy = data.removesuffix(b"\n")
+    path = h.skill.home / ".ssh" / "ssh-manager" / "deploy.key"
+    path.parent.mkdir(mode=0o700)
+    path.write_bytes(legacy)
+    path.chmod(0o600)
+    s = server(key_id="k1", key={"id": "k1", "name": "deploy", "key_encrypted": keys.seal(legacy)})
+
+    for _ in range(2):
+        result, _extra = h.handle({"type": "sync", "server": s})
+        assert result["success"], result
+        pub = subprocess.run(["ssh-keygen", "-y", "-P", "", "-f", str(path)],
+                             capture_output=True, text=True, check=True).stdout
+        assert pub.split()[:2] == want.split()
+        assert path.read_bytes() == data
 
 
 @pytest.mark.skipif(not shutil.which("ssh-keygen"), reason="需要 ssh-keygen")

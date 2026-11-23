@@ -13,7 +13,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { Textarea } from "@/components/ui/textarea";
 import { api, fmtTime, runJob, type SshKey, type Status } from "@/lib/api";
 import { sealData } from "@/lib/crypto";
-import { inspectPrivateKey } from "@/lib/sshkey";
+import { ensureOpenSshFinalNewline, inspectPrivateKey } from "@/lib/sshkey";
 import { type Backup, buildSyncScript, type ExportKey, type ExportServer, type SyncResult, unlockAgentKey, windowsOneLiner } from "@/lib/restore";
 import { Field } from "./server-form";
 
@@ -39,7 +39,9 @@ export function KeysDialog({ open, onOpenChange, keys, publicKey, onChanged }: O
 		try {
 			if (!/^[A-Za-z0-9._-]+$/.test(name)) throw new Error("名称只能包含字母、数字、. _ -");
 			const file = fileRef.current?.files?.[0];
-			const bytes = file ? new Uint8Array(await file.arrayBuffer()) : new TextEncoder().encode(text.trim() + "\n");
+			const bytes = file
+				? ensureOpenSshFinalNewline(new Uint8Array(await file.arrayBuffer()))
+				: new TextEncoder().encode(text.trim() + "\n");
 			const content = new TextDecoder().decode(bytes);
 			if (!/-----BEGIN [A-Z ]*PRIVATE KEY-----/.test(content)) throw new Error("看起来不是私钥文件（缺少 BEGIN ... PRIVATE KEY）");
 			const info = inspectPrivateKey(content);
