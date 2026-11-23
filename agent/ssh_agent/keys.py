@@ -15,6 +15,13 @@ AAD_V2 = b"ssh-manager-bundle-v2"
 OAEP = padding.OAEP(mgf=padding.MGF1(algorithm=hashes.SHA256()), algorithm=hashes.SHA256(), label=None)
 
 
+def ensure_openssh_final_newline(data: bytes) -> bytes:
+    """OpenSSH 要求私钥结束标记所在行以换行结尾。"""
+    if data.endswith(b"\n-----END OPENSSH PRIVATE KEY-----"):
+        return data + b"\n"
+    return data
+
+
 def private_key_encrypted(private_key: bytes) -> bool:
     """私钥是否带口令（OpenSSH 或 PEM 格式）。"""
     if b"Proc-Type: 4,ENCRYPTED" in private_key or b"BEGIN ENCRYPTED PRIVATE KEY" in private_key:

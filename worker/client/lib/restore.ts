@@ -2,6 +2,7 @@
 // 生成一段同步脚本（复制到剪贴板，在终端用 `pbpaste | bash` 运行）。
 // 浏览器不能直接写 ~/.ssh（Chromium 的 File System Access 明确禁止），所以需要这一步终端命令。
 import { scryptAsync } from "@noble/hashes/scrypt.js";
+import { ensureOpenSshFinalNewline } from "./sshkey.ts";
 import { fromB64, HOSTKEY_RE, knownHostsPattern, PUBKEY_RE, SAFE_HOST_RE, toB64 } from "../../shared/ssh.ts";
 
 export type Backup = { v: number; kdf: string; n: number; r: number; p: number; salt: string; nonce: string; ciphertext: string };
@@ -41,7 +42,7 @@ async function decryptPassword(priv: CryptoKey, token: string) {
 	return dec.decode(await crypto.subtle.decrypt({ name: "RSA-OAEP" }, priv, fromB64(token)));
 }
 
-async function unseal(priv: CryptoKey, token: string): Promise<Uint8Array> {
+async function unseal(priv: CryptoKey, token: string): Promise<Uint8Array<ArrayBuffer>> {
 	const [v, wrapped, iv, ct] = token.split(".");
 	if (v !== "v1") throw new Error("不支持的密钥格式");
 	const raw = await crypto.subtle.decrypt({ name: "RSA-OAEP" }, priv, fromB64(wrapped));
@@ -111,7 +112,7 @@ async function prepare(priv: CryptoKey, servers: ExportServer[], keys: ExportKey
 			if (s.key_id && !k) { skipped.push(`${s.alias}（云端密钥缺失）`); continue; }
 			if (k) {
 				if (!ALIAS_RE.test(k.name)) { skipped.push(`${s.alias}（密钥名不合法）`); continue; }
-				if (!used.has(k.name)) used.set(k.name, await unseal(priv, k.key_encrypted));
+				if (!used.has(k.name)) used.set(k.name, ensureOpenSshFinalNewline(await unseal(priv, k.key_encrypted)));
 				// 公钥会放进脚本的单引号里，用共享的严格格式校验（注释不含引号）
 				if (k.public_key && PUBKEY_RE.test(k.public_key)) pubs.set(k.name, k.public_key);
 				identity = `~/.ssh/ssh-manager/${k.name}.key`; // Windows 版 OpenSSH 同样支持 ~
